@@ -1,0 +1,15 @@
+#!/bin/sh
+# 엑셀·CSV 등 데이터 파일이 스테이징되면 커밋을 막는다(.gitignore를 -f로 우회한 경우 대비).
+bad=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(xls|xlsx|xlsm|xlsb|csv|zip)$')
+if [ -n "$bad" ]; then
+  echo "데이터 파일은 커밋할 수 없습니다:" >&2
+  echo "$bad" >&2
+  exit 1
+fi
+# 결과물 흔적(xlsx 내부 XML)이 텍스트로 들어오는 것도 막는다. 테스트의 짧은 예시는 허용.
+cells=$(git diff --cached --diff-filter=ACMR -U0 -- . ':!vendor' | grep -oE '<c r="[A-Z]+[0-9]+"' | wc -l)
+if [ "$cells" -gt 50 ]; then
+  echo "워크북 XML로 보이는 내용이 포함되어 커밋을 막습니다." >&2
+  exit 1
+fi
+exit 0

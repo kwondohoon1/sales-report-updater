@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 파일은 이 페이지 밖으로 나가지 않는다: 외부 연결(connect/fetch/폼 전송)을 전부 막는다 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>매출현황 최신화</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>매출현황 최신화</h1>
+    <p class="lede">판매·재고·가격세팅 엑셀을 넣으면 매출현황 워크북을 고쳐서 내려받게 해 줍니다.</p>
+    <p class="privacy"><span class="dot" aria-hidden="true"></span>파일은 이 브라우저 안에서만 처리됩니다. 서버로 보내지 않으며, 페이지가 외부와 통신하지 못하도록 막혀 있습니다.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card" id="step-files">
+    <h2><span class="num">1</span>파일 넣기</h2>
+    <label class="drop" id="drop">
+      <input type="file" id="picker" multiple accept=".xls,.xlsx">
+      <strong>엑셀 파일을 여기로 끌어 놓거나 눌러서 고르세요</strong>
+      <span>여러 개를 한꺼번에 넣어도 종류를 알아서 구분합니다</span>
+    </label>
+    <ul class="slots" id="slots">
+      <li data-kind="base"><b>매출현황</b><small>필수 · 판매현황/재고 시트가 있는 워크북</small><div class="files"></div></li>
+      <li data-kind="sales"><b>판매 내역</b><small>회계전송 xls · 여러 개 가능</small><div class="files"></div></li>
+      <li data-kind="stock"><b>재고</b><small>가용 재고 조회 xls · 넣으면 재고 시트를 교체</small><div class="files"></div></li>
+      <li data-kind="price"><b>가격세팅</b><small>정산가세팅 시트 · 정산·원가 기준</small><div class="files"></div></li>
+    </ul>
+    <p class="msg" id="file-msg" role="status"></p>
+  </section>
+
+  <section class="card" id="step-check" hidden>
+    <h2><span class="num">2</span>확인</h2>
+    <div class="stats" id="stats"></div>
+    <div id="warnings"></div>
+
+    <h3>상품 <small>코드별 분류와 가격세팅 매칭 · 바꾼 값은 이 브라우저에 기억됩니다</small></h3>
+    <div class="table-wrap"><table class="grid" id="products"></table></div>
+
+    <details id="rows-box">
+      <summary>추가될 판매행 보기</summary>
+      <div class="table-wrap"><table class="grid" id="rows"></table></div>
+    </details>
+    <details id="skip-box">
+      <summary>제외된 행 보기</summary>
+      <div class="table-wrap"><table class="grid" id="skipped"></table></div>
+    </details>
+  </section>
+
+  <section class="card" id="step-build" hidden>
+    <h2><span class="num">3</span>내려받기</h2>
+    <p class="hint" id="build-hint"></p>
+    <div class="actions">
+      <button type="button" class="primary" id="build">최신화한 엑셀 만들기</button>
+      <a class="primary" id="download" hidden>내려받기</a>
+    </div>
+    <div id="report"></div>
+  </section>
+
+  <footer class="foot">
+    <button type="button" class="link" id="reset-memory">기억한 상품 설정 지우기</button>
+  </footer>
+</main>
+
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="vendor/jszip.min.js"></script>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
