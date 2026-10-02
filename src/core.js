@@ -659,13 +659,65 @@ function buildStockSheet(xml, sst, stock) {
 }
 
 // 일별 시트: 이번에 들어온 출고일마다 카테고리·모델 × 판매사이트 수량표를 만든다(최신 날짜가 위)
-function buildDailySheet(xml, sst, dates, byDate, modelOrder) {
-  const sh = parseSheet(xml);
+// 일별 시트의 서식은 행 위치가 아니라 내용으로 찾는다(이 도구가 만든 결과를 다시 넣어도 같게)
+function dailyStyles(sh, sst) {
   const st = (r, c) => { const x = getCell(sh, r, c); return x ? getAttr(x.attrs, 's') : null; };
-  const S = { title: st(1, 1), head: st(4, 1), sumLabel: st(5, 1), sumNum: st(5, 6) ?? st(5, 3) };
+  const rows = [...sh.rows.keys()].sort((a, b) => a - b);
+  const find = (re) => rows.find((r) => re.test((cellText(getCell(sh, r, 1), sst) || '').trim()));
+  const headRow = find(/^카테고리$/);
+  const sumRow = find(/요약$/);
+  let sumNum = null;
+  if (sumRow) for (let c = 3; c <= 30 && sumNum == null; c++) sumNum = st(sumRow, c);
+  return {
+    title: st(rows[0] || 1, 1),
+    head: headRow ? st(headRow, 1) : null,
+    headRow,
+    sumLabel: sumRow ? st(sumRow, 1) : null,
+    sumNum,
+  };
+}
+
+// 요약 행 서식에서 굵기·배경만 뺀 모델 행 서식을 styles.xml에 더한다. 같은 서식이 이미 있으면 그것을 쓴다.
+export function plainDailyStyles(stylesXml, labelXf, numXf) {
+  const cx = /<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/.exec(stylesXml);
+  const fo = /<fonts count="(\d+)"([^>]*)>([\s\S]*?)<\/fonts>/.exec(stylesXml);
+  if (!cx || !fo || labelXf == null) return { xml: stylesXml, label: labelXf, num: numXf };
+  const xfs = cx[2].match(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g);
+  const fonts = fo[3].match(/<font\b[\s\S]*?<\/font>|<font\/>/g);
+  let xml = stylesXml;
+  let fontList = [...fonts];
+  const plainFont = (fid) => {
+    const f = fonts[fid];
+    if (!f || !f.includes('<b/>')) return fid;
+    const nb = f.replace('<b/>', '');
+    let i = fontList.indexOf(nb);
+    if (i < 0) { fontList.push(nb); i = fontList.length - 1; }
+    return i;
+  };
+  const strip = (xf) => {
+    const fid = +(/fontId="(\d+)"/.exec(xf) || [0, 0])[1];
+    return xf.replace(/fontId="\d+"/, `fontId="${plainFont(fid)}"`).replace(/fillId="\d+"/, 'fillId="0"').replace(/\s+applyFill="1"/, '');
+  };
+  let xfList = [...xfs];
+  const addXf = (x) => { let i = xfList.indexOf(x); if (i < 0) { xfList.push(x); i = xfList.length - 1; } return i; };
+  const label = addXf(strip(xfs[+labelXf]));
+  const num = numXf != null ? addXf(strip(xfs[+numXf])) : label;
+  if (fontList.length !== fonts.length) {
+    xml = xml.replace(fo[0], () => `<fonts count="${fontList.length}"${fo[2]}>${fontList.join('')}</fonts>`);
+  }
+  if (xfList.length !== xfs.length) {
+    xml = xml.replace(/<cellXfs count="\d+">[\s\S]*?<\/cellXfs>/, () => `<cellXfs count="${xfList.length}">${xfList.join('')}</cellXfs>`);
+  }
+  return { xml, label: String(label), num: String(num) };
+}
+
+function buildDailySheet(xml, sst, dates, byDate, modelOrder, stylesRef) {
+  const sh = parseSheet(xml);
+  const S = dailyStyles(sh, sst);
+  const P = stylesRef ? stylesRef(S) : { label: null, num: null };
   const baseMarkets = [];
-  for (let c = 3; c <= 30; c++) {
-    const v = cellText(getCell(sh, 4, c), sst);
+  for (let c = 3; c <= 30 && S.headRow; c++) {
+    const v = cellText(getCell(sh, S.headRow, c), sst);
     if (v && v.trim()) baseMarkets.push(v.trim());
   }
   const sAttr = (v) => (v != null ? ` s="${v}"` : '');
@@ -708,14 +760,14 @@ function buildDailySheet(xml, sst, dates, byDate, modelOrder) {
       });
       const sums = markets.map(() => 0);
       models.forEach((model, k) => {
-        let line = `<row r="${r}">${c('A' + r, null, k === 0 ? cat : '')}${c('B' + r, null, model)}`;
+        let line = `<row r="${r}">${c('A' + r, P.label, k === 0 ? cat : '')}${c('B' + r, P.label, model)}`;
         let tot = 0;
         markets.forEach((mk, i) => {
           const q = items.filter((x) => x.model === model && x.market === mk).reduce((s, x) => s + x.qty, 0);
           sums[i] += q; tot += q;
-          line += c(numToCol(i + 3) + r, null, q || '');
+          line += c(numToCol(i + 3) + r, P.num, q || '');
         });
-        line += c(numToCol(totalCol) + r, null, tot) + '</row>';
+        line += c(numToCol(totalCol) + r, P.num, tot) + '</row>';
         body += line; r++;
       });
       let sl = `<row r="${r}">${c('A' + r, S.sumLabel, `${cat} 요약`)}${c('B' + r, S.sumLabel, '')}`;
@@ -828,7 +880,13 @@ export async function apply(JSZip, base, planned, opts = {}) {
     const modelOrder = [];
     for (const v of base.monthCodes.values()) if (!modelOrder.includes(v.model)) modelOrder.push(v.model);
     const dates = [...new Set(planned.rows.map((r) => r.serial))];
-    texts.set(DAILY_SHEET, buildDailySheet(texts.get(DAILY_SHEET), wb.sst, dates, byDate, modelOrder));
+    let stylesXml = await readText(zip, 'xl/styles.xml');
+    const daily = buildDailySheet(texts.get(DAILY_SHEET), wb.sst, dates, byDate, modelOrder, (S) => {
+      const r = plainDailyStyles(stylesXml, S.sumLabel, S.sumNum);
+      if (r.xml !== stylesXml) { stylesXml = r.xml; zip.file('xl/styles.xml', stylesXml); }
+      return r;
+    });
+    texts.set(DAILY_SHEET, daily);
     report.daily = dates.length;
   }
 
