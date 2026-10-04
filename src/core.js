@@ -295,7 +295,7 @@ export async function readBase(JSZip, buf, fileName) {
     const o = n(15);
     if (o != null) {
       const list = byDate.get(o) || [];
-      list.push({ code, model: model || '', cat: cat || '', market: t(13) || '', qty: n(4) || 0, amt: (n(3) || 0) * (n(4) || 0) });
+      list.push({ code, model: model || '', cat: cat || '', market: t(13) || '', qty: n(4) || 0, amt: (n(3) || 0) * (n(4) || 0), price: n(3), settle: n(8) });
       byDate.set(o, list);
     }
   }

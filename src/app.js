@@ -1,5 +1,6 @@
 // 화면 동작. 계산은 전부 core.js가 하고, 여기서는 파일을 모으고 결과를 보여준다.
 import * as core from './core.js';
+import * as PC from './pricecheck.js';
 
 const XLSX = window.XLSX;
 const JSZip = window.JSZip;
@@ -93,6 +94,11 @@ async function readInputs() {
   for (const s of f.sales) state.salesRows.push(...core.readSalesFile(XLSX, s.buf, s.name));
   state.stock = f.stock ? core.readStockFile(XLSX, f.stock.buf, f.stock.name) : null;
   state.price = f.price ? core.readPriceFile(XLSX, f.price.buf, f.price.name) : null;
+  state.priceCheck = null;
+  if (f.price) {
+    try { state.priceCheck = PC.checkPriceFile(XLSX, f.price.buf, f.price.name, { base: state.base, reportDate: readReportDate() }); }
+    catch (e) { console.error(e); state.priceCheck = { failed: e.message }; }
+  }
 }
 
 async function analyze(problems) {
@@ -103,6 +109,7 @@ async function analyze(problems) {
     problems.push(e.message);
     state.base = null;
   }
+  renderPriceCheck();
   if (!state.base) {
     $('#step-check').hidden = true;
     $('#step-build').hidden = true;
@@ -117,6 +124,61 @@ function replan() {
   state.planned = core.plan(state.base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap });
   renderStock();
   renderCheck();
+}
+
+// 가격세팅 검사 결과. 심각도 칩을 눌러 숨기거나 보일 수 있다.
+const sevHidden = new Set();
+function renderPriceCheck() {
+  const card = $('#price-card');
+  const pc = state.priceCheck;
+  if (!pc) { card.hidden = true; return; }
+  card.hidden = false;
+  const body = $('#price-body');
+  const chips = $('#price-chips');
+  if (pc.failed) {
+    $('#price-src').textContent = state.files.price.name;
+    chips.replaceChildren();
+    body.replaceChildren(el('div', { class: 'note bad' }, `검사하지 못했습니다: ${pc.failed}`));
+    return;
+  }
+  const tables = (pc.tables || []).map((t) => `${t.label} ${t.rows}개`).join(' · ');
+  $('#price-src').textContent = `${state.files.price.name} · ${tables}${state.base ? '' : ' · 매출현황이 없어 대조 항목은 건너뜀'}`;
+  const total = pc.items.length;
+  chips.replaceChildren(
+    ...(total ? ['error', 'warn', 'info'].map((sev) => el('button', {
+      type: 'button', class: `chip ${sev} ${sevHidden.has(sev) ? 'off' : ''}`,
+      onclick: () => { if (sevHidden.has(sev)) sevHidden.delete(sev); else sevHidden.add(sev); renderPriceCheck(); },
+    }, PC.SEV[sev], el('span', { class: 'n' }, String(pc.counts[sev])))) : [el('span', { class: 'chip ok' }, '문제 없음')]),
+  );
+  const shown = pc.items.filter((i) => !sevHidden.has(i.sev));
+  const groups = PC.CATEGORIES.map((cat) => [cat, shown.filter((i) => i.cat === cat)]).filter(([, l]) => l.length);
+  body.replaceChildren(...groups.map(([cat, list]) => {
+    const c = { error: 0, warn: 0, info: 0 };
+    for (const i of list) c[i.sev]++;
+    const head = el('tr', {}, ['구분', '위치', '내용', '상품'].map((h) => el('th', {}, h)));
+    const rows = list.map((i) => el('tr', {},
+      el('td', {}, el('span', { class: `sev ${i.sev}` }, PC.SEV[i.sev])),
+      el('td', { class: 'loc' }, i.sheet ? `${i.sheet}!${i.addr}` : ''),
+      el('td', { class: 'msg' }, i.msg),
+      el('td', { class: 'wrap dim' }, i.product)));
+    return el('details', { class: 'cat', open: c.error + c.warn > 0 },
+      el('summary', {}, el('b', {}, cat),
+        el('span', { class: 'cnt' }, ...['error', 'warn', 'info'].filter((s) => c[s]).map((s) => el('span', { class: `sev ${s}` }, `${PC.SEV[s]} ${c[s]}`)))),
+      el('div', { class: 'table-wrap' }, el('table', { class: 'grid' }, el('thead', {}, head), el('tbody', {}, rows))));
+  }));
+}
+
+function priceCheckText() {
+  const pc = state.priceCheck;
+  if (!pc || pc.failed) return '';
+  const lines = [`가격세팅 검사 — ${state.files.price.name} — 오류 ${pc.counts.error} · 주의 ${pc.counts.warn} · 정보 ${pc.counts.info}`];
+  for (const cat of PC.CATEGORIES) {
+    const list = pc.items.filter((i) => i.cat === cat);
+    if (!list.length) continue;
+    lines.push('', `[${cat}]`);
+    for (const i of list) lines.push(`- (${PC.SEV[i.sev]}) ${i.sheet ? `${i.sheet}!${i.addr} ` : ''}${i.product ? `${i.product} — ` : ''}${i.msg}`);
+  }
+  return lines.join('\n');
 }
 
 // 가격세팅 순서대로 재고. 재고 파일이 있으면 그것, 없으면 매출현황의 재고 시트.
@@ -327,7 +389,7 @@ function readReportDate() {
 function initReportDate() {
   const d = core.prevBusinessDay(new Date());
   $('#report-date').value = `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
-  $('#report-date').addEventListener('change', () => { clearDownload(); updateNamePreview(); });
+  $('#report-date').addEventListener('change', () => { clearDownload(); updateNamePreview(); if (state.files.price) analyze([]); });
 }
 function updateNamePreview() {
   const f = state.files.base;
@@ -346,6 +408,13 @@ drop.addEventListener('drop', (e) => addFiles([...e.dataTransfer.files]));
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => { e.preventDefault(); if (!drop.contains(e.target)) addFiles([...e.dataTransfer.files]); });
 $('#build').addEventListener('click', build);
+$('#price-copy').addEventListener('click', async () => {
+  const text = priceCheckText();
+  if (!text) return;
+  try { await navigator.clipboard.writeText(text); $('#price-copy').textContent = '복사했습니다'; }
+  catch { $('#price-copy').textContent = '복사 실패 — 브라우저가 막음'; }
+  setTimeout(() => { $('#price-copy').textContent = '검사 결과 복사'; }, 1500);
+});
 $('#reset-memory').addEventListener('click', () => {
   mem = { products: {}, priceMap: {} };
   saveMem();
