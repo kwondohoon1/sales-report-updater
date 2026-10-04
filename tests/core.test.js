@@ -61,9 +61,23 @@ test('공유 수식 풀기 후 직렬화가 셀을 보존한다', () => {
   assert.match(out, /<c r="C1" s="3"><f>B1\*2<\/f><v>4<\/v><\/c>/);
 });
 
-test('결과 파일명은 오늘 날짜로 앞 6자리를 바꾼다', () => {
-  assert.equal(core.outputName('261001_매출현황_컴포넌트.xlsx', new Date(2026, 9, 2)), '261002_매출현황_컴포넌트.xlsx');
-  assert.equal(core.outputName('매출.xlsx', new Date(2026, 9, 2)), '261002_매출.xlsx');
+test('결과 파일명은 기준일로 앞 6자리를 바꾼다', () => {
+  assert.equal(core.outputName('261001_매출현황_컴포넌트.xlsx', { y: 2026, m: 10, d: 2 }), '261002_매출현황_컴포넌트.xlsx');
+  assert.equal(core.outputName('매출.xlsx', { y: 2026, m: 10, d: 2 }), '261002_매출.xlsx');
+});
+
+test('1영업일 전: 주말·대체공휴일을 건너뛴다', () => {
+  const p = (y, m, d) => core.prevBusinessDay(new Date(y, m - 1, d));
+  assert.deepEqual(p(2026, 10, 6), { y: 2026, m: 10, d: 2 }); // 10/5 개천절 대체공휴일
+  assert.deepEqual(p(2026, 10, 5), { y: 2026, m: 10, d: 2 });
+  assert.deepEqual(p(2026, 10, 2), { y: 2026, m: 10, d: 1 });
+  assert.deepEqual(p(2026, 10, 12), { y: 2026, m: 10, d: 8 }); // 10/9 한글날
+});
+
+test("일별 날짜: 기준일과 그 전 영업일, 최신이 먼저", () => {
+  const s = core.serialFromYMD;
+  const got = core.dailyDates([s(2026, 10, 1)], { y: 2026, m: 10, d: 2 }, new Map());
+  assert.deepEqual(got, [s(2026, 10, 2), s(2026, 10, 1)]);
 });
 
 const FIX = process.env.SRU_FIXTURES;

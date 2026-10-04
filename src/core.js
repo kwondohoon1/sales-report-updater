@@ -295,7 +295,7 @@ export async function readBase(JSZip, buf, fileName) {
     const o = n(15);
     if (o != null) {
       const list = byDate.get(o) || [];
-      list.push({ code, model: model || '', cat: cat || '', market: t(13) || '', qty: n(4) || 0 });
+      list.push({ code, model: model || '', cat: cat || '', market: t(13) || '', qty: n(4) || 0, amt: (n(3) || 0) * (n(4) || 0) });
       byDate.set(o, list);
     }
   }
@@ -516,7 +516,7 @@ export function plan(base, salesRows, price, overrides = {}) {
       costFrom: p.match && p.match.item.cost != null ? '가격세팅' : (p.histCost != null ? '이전 판매행' : null),
     });
   }
-  rows.sort((a, b) => a.serial - b.serial || a.market.localeCompare(b.market) || a.code.localeCompare(b.code));
+  rows.sort((a, b) => a.serial - b.serial); // 같은 날은 판매 파일 순서 그대로(안정 정렬)
   return { rows, skipped, products: [...products.values()] };
 }
 
@@ -584,17 +584,20 @@ function updateCosts(sh, sst, costByCode, report, sheetName) {
     if (!code || !cell || cell.f) continue;
     const cost = costByCode.get(code);
     const old = cellNumber(cell);
-    if (cost == null || old == null || old === cost) continue;
+    if (cost == null || old == null || Math.abs(old - cost) < 1) continue; // 소수점 차이는 그대로 둔다
     setNumber(cell, cost);
     report.push(`${sheetName} AU${r} ${code} 원가 ${old.toLocaleString()} → ${cost.toLocaleString()}`);
   }
 }
 
-// 기존 월 시트: 이달 날짜 열 중 비어 있거나 '=0'인 칸에 C열 수식을 옮겨 채우고 총계 날짜 범위를 월말로 맞춘다
-function refreshMonthSheet(sh, sst, ym) {
+// 기존 월 시트: 기존 수작업처럼 데이터가 있는 마지막 날(upTo)까지의 날짜 칸 중 비어 있거나 '=0'인 칸에
+// C열 수식을 옮겨 채우고, 총계(AH 등)의 끝 날짜를 upTo로 맞춘다.
+function refreshMonthSheet(sh, sst, ym, upTo) {
   const { y, m } = fromYymm(ym);
   const last = daysInMonth(y, m);
-  const lo = serialFromYMD(y, m, 1), hi = serialFromYMD(y, m, last);
+  const lo = serialFromYMD(y, m, 1);
+  const hi = Math.min(upTo ?? serialFromYMD(y, m, last), serialFromYMD(y, m, last));
+  const endDay = ymdFromSerial(hi).d;
   const { headerRows, dateCols } = monthLayout(sh, sst);
   if (!headerRows.length) return { filled: 0 };
   expandSharedFormulas(sh);
@@ -615,7 +618,7 @@ function refreshMonthSheet(sh, sst, ym) {
   for (const row of sh.rows.values()) {
     for (const cell of row.cells.values()) {
       if (!cell.f || !cell.f.text) continue;
-      cell.f.text = fixDates(cell.f.text, (yy, mm, dd) => (yy === y && mm === m && dd !== 1 && dd !== last ? { y, m, d: last } : null));
+      cell.f.text = fixDates(cell.f.text, (yy, mm, dd) => (yy === y && mm === m && dd !== 1 && dd < endDay ? { y, m, d: endDay } : null));
     }
   }
   dropFormulaCache(sh);
@@ -746,8 +749,9 @@ function buildStockSheet(xml, sst, stock) {
   return { xml: out, last };
 }
 
-// 일별 시트: 이번에 들어온 출고일마다 카테고리·모델 × 판매사이트 수량표를 만든다(최신 날짜가 위)
-// 일별 시트의 서식은 행 위치가 아니라 내용으로 찾는다(이 도구가 만든 결과를 다시 넣어도 같게)
+// 일별 시트: 기존 수작업과 같은 양식. 날짜 블록마다 그날 판매가 있는 사이트만 열로 두고,
+// 상품코드·출고일·사이트 조건의 SUMIFS 수식과 요약 SUM 수식을 넣는다(최신 날짜가 위).
+// 판매가 없는 날은 기본 사이트 열에 요약 3줄만 둔다.
 function dailyStyles(sh, sst) {
   const st = (r, c) => { const x = getCell(sh, r, c); return x ? getAttr(x.attrs, 's') : null; };
   const rows = [...sh.rows.keys()].sort((a, b) => a - b);
@@ -765,15 +769,15 @@ function dailyStyles(sh, sst) {
   };
 }
 
-// 요약 행 서식에서 굵기·배경만 뺀 모델 행 서식을 styles.xml에 더한다. 같은 서식이 이미 있으면 그것을 쓴다.
+// 요약 서식에서 배경을 뺀 서식(카테고리: 굵게 유지, 모델명·숫자: 보통)을 styles.xml에 더한다.
+// 같은 서식이 이미 있으면 그것을 쓴다.
 export function plainDailyStyles(stylesXml, labelXf, numXf) {
   const cx = /<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/.exec(stylesXml);
   const fo = /<fonts count="(\d+)"([^>]*)>([\s\S]*?)<\/fonts>/.exec(stylesXml);
-  if (!cx || !fo || labelXf == null) return { xml: stylesXml, label: labelXf, num: numXf };
+  if (!cx || !fo || labelXf == null) return { xml: stylesXml, label: labelXf, num: numXf, cat: labelXf };
   const xfs = cx[2].match(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g);
   const fonts = fo[3].match(/<font\b[\s\S]*?<\/font>|<font\/>/g);
-  let xml = stylesXml;
-  let fontList = [...fonts];
+  const fontList = [...fonts];
   const plainFont = (fid) => {
     const f = fonts[fid];
     if (!f || !f.includes('<b/>')) return fid;
@@ -782,93 +786,123 @@ export function plainDailyStyles(stylesXml, labelXf, numXf) {
     if (i < 0) { fontList.push(nb); i = fontList.length - 1; }
     return i;
   };
-  const strip = (xf) => {
+  const noFill = (xf) => xf.replace(/fillId="\d+"/, 'fillId="0"').replace(/\s+applyFill="1"/, '');
+  const plain = (xf) => {
     const fid = +(/fontId="(\d+)"/.exec(xf) || [0, 0])[1];
-    return xf.replace(/fontId="\d+"/, `fontId="${plainFont(fid)}"`).replace(/fillId="\d+"/, 'fillId="0"').replace(/\s+applyFill="1"/, '');
+    return noFill(xf).replace(/fontId="\d+"/, `fontId="${plainFont(fid)}"`);
   };
-  let xfList = [...xfs];
-  const addXf = (x) => { let i = xfList.indexOf(x); if (i < 0) { xfList.push(x); i = xfList.length - 1; } return i; };
-  const label = addXf(strip(xfs[+labelXf]));
-  const num = numXf != null ? addXf(strip(xfs[+numXf])) : label;
+  const xfList = [...xfs];
+  const addXf = (x) => { let i = xfList.indexOf(x); if (i < 0) { xfList.push(x); i = xfList.length - 1; } return String(i); };
+  const label = addXf(plain(xfs[+labelXf]));
+  const cat = addXf(noFill(xfs[+labelXf]));
+  const num = numXf != null ? addXf(plain(xfs[+numXf])) : label;
+  let xml = stylesXml;
   if (fontList.length !== fonts.length) {
     xml = xml.replace(fo[0], () => `<fonts count="${fontList.length}"${fo[2]}>${fontList.join('')}</fonts>`);
   }
   if (xfList.length !== xfs.length) {
     xml = xml.replace(/<cellXfs count="\d+">[\s\S]*?<\/cellXfs>/, () => `<cellXfs count="${xfList.length}">${xfList.join('')}</cellXfs>`);
   }
-  return { xml, label: String(label), num: String(num) };
+  return { xml, label, num, cat };
 }
 
-function buildDailySheet(xml, sst, dates, byDate, modelOrder, stylesRef) {
+const DEFAULT_DAILY_MARKETS = ['지마켓', '옥션', 'N페이'];
+
+function buildDailySheet(xml, sst, dates, byDate, modelOrder, stylesRef, lastRow) {
   const sh = parseSheet(xml);
   const S = dailyStyles(sh, sst);
-  const P = stylesRef ? stylesRef(S) : { label: null, num: null };
-  const baseMarkets = [];
-  for (let c = 3; c <= 30 && S.headRow; c++) {
-    const v = cellText(getCell(sh, S.headRow, c), sst);
-    if (v && v.trim()) baseMarkets.push(v.trim());
-  }
+  const P = stylesRef ? stylesRef(S) : { label: null, num: null, cat: null };
   const sAttr = (v) => (v != null ? ` s="${v}"` : '');
   const c = (ref, s, v) => {
     if (v == null || v === '') return `<c r="${ref}"${sAttr(s)}/>`;
     if (typeof v === 'number') return `<c r="${ref}"${sAttr(s)}><v>${v}</v></c>`;
+    if (typeof v === 'object') return `<c r="${ref}"${sAttr(s)}><f>${esc(v.f)}</f></c>`;
     return `<c r="${ref}"${sAttr(s)} t="inlineStr"><is><t>${esc(v)}</t></is></c>`;
   };
+  const rng = (col) => `판매현황!$${col}$3:$${col}$${lastRow}`;
   let body = '';
   let r = 1;
   let maxCol = 6;
   let lastWritten = 1;
-  for (const serial of [...dates].sort((a, b) => b - a)) {
-    const list = byDate.get(serial) || [];
-    const markets = [...baseMarkets];
-    for (const x of list) if (x.market && !markets.includes(x.market)) markets.push(x.market);
+  for (const serial of [...new Set(dates)].sort((a, b) => b - a)) {
+    const list = (byDate.get(serial) || []).filter((x) => x.qty);
+    // 사이트 열은 그날 판매금액이 큰 순(기존 수작업과 같다)
+    const amtBy = new Map();
+    for (const x of list) amtBy.set(x.market, (amtBy.get(x.market) || 0) + (x.amt || 0));
+    const markets = list.length
+      ? [...amtBy.keys()].sort((a, b) => amtBy.get(b) - amtBy.get(a) || a.localeCompare(b))
+      : [...DEFAULT_DAILY_MARKETS];
     const totalCol = markets.length + 3;
+    const lastMk = numToCol(totalCol - 1);
     maxCol = Math.max(maxCol, totalCol);
-    const { m, d, dow } = ymdFromSerial(serial);
+    const { y, m, d, dow } = ymdFromSerial(serial);
+    const dateF = `DATE(${y},${m},${d})`;
+
     body += `<row r="${r}">${c('A' + r, S.title, `${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}(${DOW[dow]})`)}</row>`;
     r++;
     let h = `<row r="${r}">${c('A' + r, S.head, '')}${c('B' + r, S.head, '')}`;
     markets.forEach((_, i) => { h += c(numToCol(i + 3) + r, S.head, i === 0 ? '판매사이트' : ''); });
-    h += c(numToCol(totalCol) + r, S.head, '합계') + '</row>';
-    body += h; r++;
+    body += h + c(numToCol(totalCol) + r, S.head, '합계') + '</row>';
+    r++;
     let blank = `<row r="${r}">`;
     for (let k = 1; k <= totalCol; k++) blank += c(numToCol(k) + r, S.head, '');
-    body += blank + '</row>'; r++;
+    body += blank + '</row>';
+    r++;
+    const headerRow = r;
     let hh = `<row r="${r}">${c('A' + r, S.head, '카테고리')}${c('B' + r, S.head, '모델명')}`;
     markets.forEach((mk, i) => { hh += c(numToCol(i + 3) + r, S.head, mk); });
-    hh += c(numToCol(totalCol) + r, S.head, '') + '</row>';
-    body += hh; r++;
+    body += hh + c(numToCol(totalCol) + r, S.head, '') + '</row>';
+    r++;
 
-    const cats = [...new Set([...CATEGORY_ORDER, ...list.map((x) => x.cat).filter(Boolean)])];
+    const present = [...new Set(list.map((x) => x.cat).filter(Boolean))];
+    const cats = list.length
+      ? [...CATEGORY_ORDER.filter((k) => present.includes(k)), ...present.filter((k) => !CATEGORY_ORDER.includes(k))]
+      : CATEGORY_ORDER;
     for (const cat of cats) {
-      const items = list.filter((x) => x.cat === cat);
-      const models = [...new Set(items.map((x) => x.model))].sort((a, b) => {
-        const ia = modelOrder.indexOf(a), ib = modelOrder.indexOf(b);
-        return (ia < 0 ? 1e9 : ia) - (ib < 0 ? 1e9 : ib) || a.localeCompare(b);
+      const codes = new Map();
+      for (const x of list) if (x.cat === cat && !codes.has(x.code)) codes.set(x.code, x.model || x.code);
+      const items = [...codes].sort((a, b) => {
+        const ia = modelOrder.indexOf(a[1]), ib = modelOrder.indexOf(b[1]);
+        return (ia < 0 ? 1e9 : ia) - (ib < 0 ? 1e9 : ib) || a[1].localeCompare(b[1]);
       });
-      const sums = markets.map(() => 0);
-      models.forEach((model, k) => {
-        let line = `<row r="${r}">${c('A' + r, P.label, k === 0 ? cat : '')}${c('B' + r, P.label, model)}`;
-        let tot = 0;
-        markets.forEach((mk, i) => {
-          const q = items.filter((x) => x.model === model && x.market === mk).reduce((s, x) => s + x.qty, 0);
-          sums[i] += q; tot += q;
-          line += c(numToCol(i + 3) + r, P.num, q || '');
+      const modelRows = [];
+      items.forEach(([code, model], k) => {
+        let line = `<row r="${r}">${c('A' + r, P.cat, k === 0 ? cat : '')}${c('B' + r, P.label, model)}`;
+        markets.forEach((_, i) => {
+          const col = numToCol(i + 3);
+          const f = `SUMIFS(${rng('D')},${rng('O')},${dateF},${rng('A')},"${code.replace(/"/g, '""')}",${rng('M')},${col}$${headerRow})`;
+          line += c(col + r, P.num, { f });
         });
-        line += c(numToCol(totalCol) + r, P.num, tot) + '</row>';
-        body += line; r++;
+        body += line + c(numToCol(totalCol) + r, P.num, { f: `SUM(C${r}:${lastMk}${r})` }) + '</row>';
+        modelRows.push(r);
+        r++;
       });
       let sl = `<row r="${r}">${c('A' + r, S.sumLabel, `${cat} 요약`)}${c('B' + r, S.sumLabel, '')}`;
-      markets.forEach((_, i) => { sl += c(numToCol(i + 3) + r, S.sumNum, sums[i] || ''); });
-      sl += c(numToCol(totalCol) + r, S.sumNum, sums.reduce((a, b) => a + b, 0)) + '</row>';
-      body += sl; lastWritten = r; r++;
+      markets.forEach((_, i) => {
+        const col = numToCol(i + 3);
+        sl += c(col + r, S.sumNum, modelRows.length ? { f: `SUM(${modelRows.map((x) => col + x).join(',')})` } : '');
+      });
+      sl += c(numToCol(totalCol) + r, S.sumNum, modelRows.length ? { f: `SUM(C${r}:${lastMk}${r})` } : 0) + '</row>';
+      body += sl;
+      lastWritten = r;
+      r++;
     }
-    r++;
+    r += 2;
   }
   let out = sh.head + body + sh.tail;
   out = setDimension(out, `A1:${numToCol(maxCol)}${lastWritten}`);
   out = out.replace(/<selection\b[^>]*\/>/, '<selection activeCell="A1" sqref="A1"/>');
   return out;
+}
+
+// 일별 시트에 넣을 날짜: 기존 수작업처럼 기준일(오늘의 1영업일 전)과 그 전 영업일 두 블록.
+// 업로드한 출고일이 그 밖에 있으면 함께 넣는다.
+export function dailyDates(newSerials, reportDate) {
+  const rd = reportDate || prevBusinessDay(new Date());
+  const rs = serialFromYMD(rd.y, rd.m, rd.d);
+  const p = prevBusinessDay(new Date(rd.y, rd.m - 1, rd.d));
+  const out = new Set([rs, serialFromYMD(p.y, p.m, p.d), ...newSerials]);
+  return [...out].sort((a, b) => b - a);
 }
 
 function setContentTypeOverride(xml, part) {
@@ -924,6 +958,13 @@ export async function apply(JSZip, base, planned, opts = {}) {
 
   // 4. 월 시트
   const costByCode = new Map();
+  if (price) {
+    // 그날 안 팔린 상품도 월 시트 모델명이 가격세팅과 정확히 같으면 원가를 맞춘다(기존 수작업과 같다)
+    for (const r of base.monthRows) {
+      const hits = price.items.filter((it) => it.key === nameKey(r.model) && it.cost != null);
+      if (hits.length === 1) costByCode.set(r.ap, hits[0].cost);
+    }
+  }
   for (const p of planned.products) if (p.match && p.match.item.cost != null) costByCode.set(p.code, p.match.item.cost);
   const monthsNeeded = [...new Set(planned.rows.map((r) => r.yymm))].sort((a, b) => a - b);
   let wbXml = wb.wbXml;
@@ -936,7 +977,9 @@ export async function apply(JSZip, base, planned, opts = {}) {
     const name = String(ym);
     if (texts.has(name)) {
       const sh = parseSheet(texts.get(name));
-      const { filled } = refreshMonthSheet(sh, wb.sst, ym);
+      const inMonth = [...base.byDate.keys(), ...planned.rows.map((r) => r.serial)]
+        .filter((sv) => { const d = ymdFromSerial(sv); return yymm(d.y, d.m) === ym; });
+      const { filled } = refreshMonthSheet(sh, wb.sst, ym, Math.max(...inMonth));
       updateCosts(sh, wb.sst, costByCode, report.costChanges, name);
       texts.set(name, serializeSheet(sh));
       report.sheetsUpdated.push(`${name} (날짜 칸 ${filled}개 채움)`);
@@ -962,18 +1005,18 @@ export async function apply(JSZip, base, planned, opts = {}) {
     for (const [k, v] of base.byDate) byDate.set(k, [...v]);
     for (const r of planned.rows) {
       const l = byDate.get(r.serial) || [];
-      l.push({ code: r.code, model: r.model, cat: r.cat, market: r.market, qty: r.qty });
+      l.push({ code: r.code, model: r.model, cat: r.cat, market: r.market, qty: r.qty, amt: r.price * r.qty });
       byDate.set(r.serial, l);
     }
     const modelOrder = [];
     for (const v of base.monthCodes.values()) if (!modelOrder.includes(v.model)) modelOrder.push(v.model);
-    const dates = [...new Set(planned.rows.map((r) => r.serial))];
+    const dates = dailyDates(planned.rows.map((r) => r.serial), opts.reportDate);
     let stylesXml = await readText(zip, 'xl/styles.xml');
     const daily = buildDailySheet(texts.get(DAILY_SHEET), wb.sst, dates, byDate, modelOrder, (S) => {
       const r = plainDailyStyles(stylesXml, S.sumLabel, S.sumNum);
       if (r.xml !== stylesXml) { stylesXml = r.xml; zip.file('xl/styles.xml', stylesXml); }
       return r;
-    });
+    }, newLast);
     texts.set(DAILY_SHEET, daily);
     report.daily = dates.length;
   }
@@ -1045,7 +1088,45 @@ export async function apply(JSZip, base, planned, opts = {}) {
   return { bytes: out, report };
 }
 
-export function outputName(baseName, now = new Date()) {
+// ---------------------------------------------------------------- 영업일
+
+// 관공서 공휴일(대체공휴일·선거일 포함)과 근로자의 날. 해마다 확인해서 늘린다.
+export const HOLIDAYS = new Set([
+  // 2026
+  '2026-01-01', '2026-02-16', '2026-02-17', '2026-02-18', '2026-03-02', '2026-05-01', '2026-05-05',
+  '2026-05-25', '2026-06-03', '2026-08-17', '2026-09-24', '2026-09-25', '2026-10-05', '2026-10-09', '2026-12-25',
+  // 2027
+  '2027-01-01', '2027-02-08', '2027-02-09', '2027-03-01', '2027-05-05', '2027-05-13', '2027-08-16',
+  '2027-09-14', '2027-09-15', '2027-09-16', '2027-10-04', '2027-10-11', '2027-12-27',
+  // 2028
+  '2028-01-26', '2028-01-27', '2028-03-01', '2028-04-12', '2028-05-01', '2028-05-02', '2028-05-05', '2028-06-06',
+  '2028-08-15', '2028-10-02', '2028-10-04', '2028-10-05', '2028-10-09', '2028-12-25',
+]);
+// 2027년 근로자의 날(5/1)은 토요일이라 따로 넣지 않았다.
+
+const ymdStr = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+export function isBusinessDay(y, m, d) {
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return dow !== 0 && dow !== 6 && !HOLIDAYS.has(ymdStr(y, m, d));
+}
+
+// 오늘 기준 1영업일 전. 10/6(화)에 뽑으면 10/5 대체공휴일·주말을 건너뛰어 10/2(금).
+export function prevBusinessDay(date = new Date()) {
+  let s = serialFromYMD(date.getFullYear(), date.getMonth() + 1, date.getDate());
+  for (let i = 0; i < 30; i++) {
+    s -= 1;
+    const d = ymdFromSerial(s);
+    if (isBusinessDay(d.y, d.m, d.d)) return { y: d.y, m: d.m, d: d.d };
+  }
+  const d = ymdFromSerial(s);
+  return { y: d.y, m: d.m, d: d.d };
+}
+
+// 파일명 앞 6자리(YYMMDD)를 기준일로 바꾼다. 기준일을 안 주면 오늘의 1영업일 전.
+export function outputName(baseName, when = null) {
+  const r = when || prevBusinessDay(new Date());
+  const now = new Date(r.y, r.m - 1, r.d);
   const stamp = `${String(now.getFullYear() % 100).padStart(2, '0')}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
   const stem = baseName.replace(/\.xlsx$/i, '');
   return (/^\d{6}/.test(stem) ? stamp + stem.slice(6) : `${stamp}_${stem}`) + '.xlsx';

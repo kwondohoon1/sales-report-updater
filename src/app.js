@@ -194,6 +194,7 @@ function renderCheck() {
     ? `원본 ${b.fileName}에 판매행 ${p.rows.length}개${state.stock ? '와 새 재고' : ''}를 반영한 사본을 만듭니다. 원본 파일은 바뀌지 않습니다.`
     : '반영할 내용이 없습니다.';
   $('#build').disabled = !(p.rows.length || state.stock);
+  updateNamePreview();
 }
 
 function renderProducts() {
@@ -286,12 +287,13 @@ async function build() {
     const f = state.files.base;
     const base = await core.readBase(JSZip, f.buf, f.name);
     const planned = core.plan(base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap });
-    const { bytes, report } = await core.apply(JSZip, base, planned, { stock: state.stock, price: state.price });
+    const reportDate = readReportDate();
+    const { bytes, report } = await core.apply(JSZip, base, planned, { stock: state.stock, price: state.price, reportDate });
     const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     state.downloadUrl = URL.createObjectURL(blob);
     const a = $('#download');
     a.href = state.downloadUrl;
-    a.download = core.outputName(f.name);
+    a.download = core.outputName(f.name, reportDate);
     a.textContent = `내려받기 · ${a.download}`;
     a.hidden = false;
     const items = [
@@ -299,7 +301,7 @@ async function build() {
       ...report.sheetsCreated.map((s) => `월 시트 생성: ${s}`),
       ...report.sheetsUpdated.map((s) => `월 시트 갱신: ${s}`),
       report.stockRows ? `재고 시트 교체: ${report.stockRows.toLocaleString()}줄` : null,
-      report.daily ? `일별 시트: 출고일 ${report.daily}일치 표` : null,
+      report.daily ? `일별 시트: ${report.daily}일치 표(기준일·전 영업일, 수식으로)` : null,
       ...report.costChanges.map((s) => `원가 갱신: ${s}`),
     ].filter(Boolean);
     $('#report').replaceChildren(
@@ -316,7 +318,24 @@ async function build() {
   }
 }
 
+// 파일명·일별 기준일: 기본은 오늘의 1영업일 전(주말·공휴일 제외), 직접 바꿀 수 있다
+function readReportDate() {
+  const v = $('#report-date').value;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  return m ? { y: +m[1], m: +m[2], d: +m[3] } : core.prevBusinessDay(new Date());
+}
+function initReportDate() {
+  const d = core.prevBusinessDay(new Date());
+  $('#report-date').value = `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
+  $('#report-date').addEventListener('change', () => { clearDownload(); updateNamePreview(); });
+}
+function updateNamePreview() {
+  const f = state.files.base;
+  $('#name-preview').textContent = f ? core.outputName(f.name, readReportDate()) : '';
+}
+
 // ---------------------------------------------------------------- 연결
+initReportDate();
 
 const drop = $('#drop');
 $('#picker').addEventListener('change', (e) => { addFiles([...e.target.files]); e.target.value = ''; });
