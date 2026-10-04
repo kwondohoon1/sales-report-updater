@@ -115,7 +115,46 @@ async function analyze(problems) {
 
 function replan() {
   state.planned = core.plan(state.base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap });
+  renderStock();
   renderCheck();
+}
+
+// 가격세팅 순서대로 재고. 재고 파일이 있으면 그것, 없으면 매출현황의 재고 시트.
+function renderStock() {
+  const card = $('#stock-card');
+  const stock = state.stock || (state.base && state.base.sheetStock);
+  if (!state.price || !state.base || !stock) { card.hidden = true; return; }
+  card.hidden = false;
+  const rows = core.stockByPrice(state.base, state.price, stock, mem.priceMap);
+  const when = stock.meta && stock.meta.length >= 4 ? ` · ${stock.meta[3]} 출력` : '';
+  $('#stock-src').textContent = `${state.stock ? '재고 파일' : '매출현황 재고 시트(재고 파일 없음)'}${when}`;
+  const whs = [...new Set(rows.flatMap((r) => Object.keys(r.byWh)))].sort();
+  const head = el('tr', {}, ['카테고리', '모델명', '총재고', '단품', '부품', ...whs, '원가', '재고금액', '코드'].map((h, i) =>
+    el('th', { class: i >= 2 && i < 5 + whs.length + 2 ? 'n' : '' }, h)));
+  const line = (r, cls) => el('tr', { class: cls },
+    el('td', {}, r.category || ''), el('td', { class: 'wrap' }, r.name),
+    el('td', { class: 'n strong' }, fmt(r.total)),
+    el('td', { class: 'n' }, fmt(r.single)), el('td', { class: 'n' }, fmt(r.part)),
+    ...whs.map((w) => el('td', { class: 'n' }, fmt(r.byWh[w] || 0))),
+    el('td', { class: 'n' }, fmt(r.cost)), el('td', { class: 'n' }, fmt(r.value)),
+    el('td', { class: 'muted' }, r.found === false ? '코드 못 찾음' : [...(r.codes || []), ...(r.partCodes || [])].join(', ')));
+  const body = [];
+  const sumOf = (list, label) => {
+    const t = { category: label, name: '', single: 0, part: 0, total: 0, byWh: {}, cost: null, value: 0 };
+    for (const r of list) {
+      t.single += r.single; t.part += r.part; t.total += r.total; t.value += r.value || 0;
+      for (const [w, v] of Object.entries(r.byWh)) t.byWh[w] = (t.byWh[w] || 0) + v;
+    }
+    return t;
+  };
+  const cats = [...new Set(rows.map((r) => r.category))];
+  for (const cat of cats) {
+    const list = rows.filter((r) => r.category === cat);
+    for (const r of list) body.push(line(r, [r.total === 0 ? 'zero' : '', r.found ? '' : 'need'].join(' ')));
+    body.push(line(sumOf(list, `${cat} 합계`), 'sum'));
+  }
+  body.push(line(sumOf(rows, '전체'), 'sum total'));
+  $('#stock-table').replaceChildren(el('thead', {}, head), el('tbody', {}, body));
 }
 
 function renderCheck() {

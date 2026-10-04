@@ -108,6 +108,13 @@ table.grid { border-collapse: collapse; width: 100%; font-size: 13px; }
 .grid tr:last-child td { border-bottom: 0; }
 .grid td.n { text-align: right; font-variant-numeric: tabular-nums; }
 .grid td.muted { color: var(--muted); }
+.grid th.n { text-align: right; }
+.grid td.wrap { white-space: normal; min-width: 200px; max-width: 360px; }
+.grid td.strong { font-weight: 700; }
+.grid tr.zero td.strong { color: var(--bad); }
+.grid tr.sum td { background: var(--chip); font-weight: 600; }
+.grid tr.sum.total td { border-top: 2px solid var(--line); }
+.card h2 .sub { color: var(--muted); font-size: 13px; font-weight: 400; }
 .grid tr.off td { color: var(--muted); }
 .grid tr.need td { background: var(--warn-bg); }
 .grid input[type=text], .grid select {

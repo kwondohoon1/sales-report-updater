@@ -316,6 +316,7 @@ export async function readBase(JSZip, buf, fileName) {
   months.sort((a, b) => a - b);
   const monthCodes = new Map();
   const monthSheetCodes = new Map(); // yymm → Set(code)
+  const monthRows = []; // 최신 월 시트의 상품 행: {cat, model, ap, aq}
   for (const m of [...months].reverse()) {
     const msh = parseSheet(await sheetXml(wb, String(m)));
     const codes = new Set();
@@ -325,6 +326,11 @@ export async function readBase(JSZip, buf, fileName) {
       const a = cellText(getCell(msh, r, 1), wb.sst);
       if (a && !/요약|TOTAL|카테고리/.test(a)) cat = a.trim();
       const b = cellText(getCell(msh, r, 2), wb.sst);
+      if (m === months[months.length - 1] && b) {
+        const ap = cellText(getCell(msh, r, 42), wb.sst);
+        const aq = cellText(getCell(msh, r, 43), wb.sst);
+        if (ap && ap !== '코드') monthRows.push({ cat, model: b.trim(), ap, aq: aq && aq !== ap ? aq : null });
+      }
       for (const col of [42, 43]) { // AP, AQ
         const code = cellText(getCell(msh, r, col), wb.sst);
         if (!code || code === '코드') continue;
@@ -335,7 +341,89 @@ export async function readBase(JSZip, buf, fileName) {
     monthSheetCodes.set(m, codes);
   }
 
-  return { fileName, wb, lastRow, orderIds, history, byDate, styles, months, monthCodes, monthSheetCodes };
+  // 기준 워크북의 재고 시트(재고 파일을 안 넣었을 때 쓴다)
+  let sheetStock = null;
+  const sx = await sheetXml(wb, STOCK_SHEET);
+  if (sx) {
+    const ssh = parseSheet(sx);
+    const idx = {};
+    const row2 = ssh.rows.get(2);
+    if (row2) for (const [c, cell] of row2.cells) { const h = (cellText(cell, wb.sst) || '').trim(); if (h) idx[h] = c - 1; }
+    const rows = [];
+    const meta = [];
+    const row1 = ssh.rows.get(1);
+    if (row1) for (const c of [...row1.cells.keys()].sort((a, b) => a - b)) meta.push(cellText(row1.cells.get(c), wb.sst));
+    for (const [r, row] of ssh.rows) {
+      if (r < 3) continue;
+      const arr = [];
+      for (const [c, cell] of row.cells) { const n = cellNumber(cell); arr[c - 1] = n != null ? n : cellText(cell, wb.sst); }
+      rows.push(arr);
+    }
+    if (idx['상품코드'] != null) sheetStock = { file: `${fileName} › 재고 시트`, meta, idx, rows };
+  }
+
+  return { fileName, wb, lastRow, orderIds, history, byDate, styles, months, monthCodes, monthSheetCodes, monthRows, sheetStock };
+}
+
+// ---------------------------------------------------------------- 재고 현황
+
+// 상품코드별 가용수량 합(창고별 내역 포함)
+export function stockIndex(stock) {
+  const out = new Map();
+  if (!stock) return out;
+  const ci = stock.idx['상품코드'], ai = stock.idx['가용수량'], wi = stock.idx['창고명'];
+  for (const r of stock.rows) {
+    const code = r[ci] == null ? '' : String(r[ci]).trim();
+    if (!code) continue;
+    const v = Number(r[ai]) || 0;
+    const e = out.get(code) || { avail: 0, byWh: {} };
+    e.avail += v;
+    if (wi != null && r[wi]) e.byWh[String(r[wi]).trim()] = (e.byWh[String(r[wi]).trim()] || 0) + v;
+    out.set(code, e);
+  }
+  return out;
+}
+
+// 가격세팅 상품 순서대로 재고를 보여준다. 상품 → 코드는 최신 월 시트의 모델명(AP 단품·AQ 부품),
+// 그다음 판매 이력 모델명, 화면에서 직접 고른 매칭(priceMap) 순으로 찾는다.
+export function stockByPrice(base, price, stock, priceMap = {}) {
+  if (!price) return [];
+  const idx = stockIndex(stock);
+  const sum = (code) => (code ? idx.get(code) : null);
+  return price.items.map((it) => {
+    const codes = { single: new Set(), part: new Set() };
+    for (const r of base.monthRows) {
+      if (nameKey(r.model) !== it.key) continue;
+      codes.single.add(r.ap);
+      if (r.aq) codes.part.add(r.aq);
+    }
+    if (!codes.single.size) {
+      for (const [code, h] of base.history) if (h.model && nameKey(h.model) === it.key) codes.single.add(code);
+    }
+    for (const [code, name] of Object.entries(priceMap)) if (name === it.name) codes.single.add(code);
+    for (const c of codes.single) codes.part.delete(c);
+    const tally = (set) => {
+      let total = 0; const byWh = {};
+      for (const c of set) {
+        const e = sum(c);
+        if (!e) continue;
+        total += e.avail;
+        for (const [w, v] of Object.entries(e.byWh)) byWh[w] = (byWh[w] || 0) + v;
+      }
+      return { total, byWh };
+    };
+    const single = tally(codes.single), part = tally(codes.part);
+    const byWh = { ...single.byWh };
+    for (const [w, v] of Object.entries(part.byWh)) byWh[w] = (byWh[w] || 0) + v;
+    const total = single.total + part.total;
+    return {
+      category: it.category, name: it.name, cost: it.cost,
+      codes: [...codes.single], partCodes: [...codes.part],
+      single: single.total, part: part.total, total, byWh,
+      value: it.cost != null ? total * it.cost : null,
+      found: codes.single.size > 0,
+    };
+  });
 }
 
 // ---------------------------------------------------------------- 계획
