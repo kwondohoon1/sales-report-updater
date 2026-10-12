@@ -121,7 +121,7 @@ async function analyze(problems) {
 }
 
 function replan() {
-  state.planned = core.plan(state.base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap });
+  state.planned = core.plan(state.base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap }, state.stock);
   renderStock();
   renderCheck();
 }
@@ -240,6 +240,9 @@ function renderCheck() {
   );
 
   const warns = [];
+  if (p.aliases && p.aliases.length) {
+    warns.push(`같은 상품인데 ERP 코드가 달라 월 시트 코드로 바꿔 넣습니다: ${p.aliases.map((a) => `${a.from} → ${a.to} (${a.model}, ${a.how}, ${a.qty}개)`).join(' · ')}`);
+  }
   if (!state.salesRows.length) warns.push('판매 내역 파일이 없습니다. 재고만 바꾸려면 그대로 진행하세요.');
   if (!state.price && p.rows.length) warns.push('가격세팅 파일이 없어 정산이 비고, 원가는 이전 판매행 값을 씁니다.');
   const noSettle = p.rows.filter((r) => r.settle == null);
@@ -348,7 +351,7 @@ async function build() {
     // apply가 패키지를 직접 고치므로 원본 버퍼에서 다시 읽는다
     const f = state.files.base;
     const base = await core.readBase(JSZip, f.buf, f.name);
-    const planned = core.plan(base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap });
+    const planned = core.plan(base, state.salesRows, state.price, { products: mem.products, priceMap: mem.priceMap }, state.stock);
     const reportDate = readReportDate();
     const { bytes, report } = await core.apply(JSZip, base, planned, { stock: state.stock, price: state.price, reportDate });
     const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -365,6 +368,8 @@ async function build() {
       report.stockRows ? `재고 시트 교체: ${report.stockRows.toLocaleString()}줄` : null,
       report.daily ? `일별 시트: ${report.daily}일치 표(기준일·전 영업일, 수식으로)` : null,
       ...report.costChanges.map((s) => `원가 갱신: ${s}`),
+      ...(report.codeAliases || []).map((a) => `코드 변환: ${a.from} → ${a.to} (${a.model}) ${a.qty}개`),
+      ...(report.stockAliases || []).map((s) => `재고 코드 추가: ${s}`),
     ].filter(Boolean);
     $('#report').replaceChildren(
       el('ul', {}, items.map((t) => el('li', {}, t))),

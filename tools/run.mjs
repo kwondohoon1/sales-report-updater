@@ -32,7 +32,8 @@ for (const f of files) {
 }
 const b = inputs.base;
 console.log(`판매현황 마지막 행 ${b.lastRow}, 기존 주문번호 ${b.orderIds.size}, 월 시트 ${b.months.join(',')}`);
-const p = core.plan(b, inputs.sales, inputs.price);
+const p = core.plan(b, inputs.sales, inputs.price, {}, inputs.stock);
+for (const a of p.aliases) console.log(`  코드 변환 ${a.from} → ${a.to} (${a.model}, ${a.how}) ${a.count}건 ${a.qty}개`);
 console.log(`추가 ${p.rows.length}행 / 중복 ${p.skipped.dup.length} / 업로드내중복 ${p.skipped.dupInUpload.length} / 제외 ${p.skipped.excluded.length} / 날짜없음 ${p.skipped.noDate.length}`);
 for (const pr of p.products) {
   console.log(`  ${pr.code.padEnd(20)} ${pr.include ? '포함' : '제외'} ${pr.cat}/${pr.model} → ${pr.match ? `${pr.match.item.name} [${pr.match.how}]` : '가격세팅 매칭 없음'}`);

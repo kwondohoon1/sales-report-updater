@@ -6,6 +6,7 @@ import {
   setFormula, setNumber, setText, clearCell, expandSharedFormulas, dropFormulaCache,
   shiftFormula, numToCol, getAttr, setAttr, parseAttrs, attrsToStr, lastRowWithValue, esc,
 } from './xml.js';
+import { buildCodeResolver } from './codes.js';
 
 export const SALES_SHEET = '판매현황';
 export const STOCK_SHEET = '재고';
@@ -317,6 +318,7 @@ export async function readBase(JSZip, buf, fileName) {
   const monthCodes = new Map();
   const monthSheetCodes = new Map(); // yymm → Set(code)
   const monthRows = []; // 최신 월 시트의 상품 행: {cat, model, ap, aq}
+  const allMonthRows = []; // 모든 월 시트의 상품 행: {ym, model, code} — 코드가 바뀐 상품을 알아보는 데 쓴다
   for (const m of [...months].reverse()) {
     const msh = parseSheet(await sheetXml(wb, String(m)));
     const codes = new Set();
@@ -335,6 +337,7 @@ export async function readBase(JSZip, buf, fileName) {
         const code = cellText(getCell(msh, r, col), wb.sst);
         if (!code || code === '코드') continue;
         codes.add(code);
+        if (b) allMonthRows.push({ ym: m, model: b.trim(), code: code.trim() });
         if (!monthCodes.has(code) && cat && b) monthCodes.set(code, { cat, model: b.trim() });
       }
     }
@@ -362,7 +365,7 @@ export async function readBase(JSZip, buf, fileName) {
     if (idx['상품코드'] != null) sheetStock = { file: `${fileName} › 재고 시트`, meta, idx, rows };
   }
 
-  return { fileName, wb, lastRow, orderIds, history, byDate, styles, months, monthCodes, monthSheetCodes, monthRows, sheetStock };
+  return { fileName, wb, lastRow, orderIds, history, byDate, styles, months, monthCodes, monthSheetCodes, monthRows, allMonthRows, sheetStock };
 }
 
 // ---------------------------------------------------------------- 재고 현황
@@ -390,12 +393,15 @@ export function stockByPrice(base, price, stock, priceMap = {}) {
   if (!price) return [];
   const idx = stockIndex(stock);
   const sum = (code) => (code ? idx.get(code) : null);
+  const resolver = buildCodeResolver(base, stock, []);
   return price.items.map((it) => {
     const codes = { single: new Set(), part: new Set() };
-    for (const r of base.monthRows) {
+    for (const r of resolver.rows) {
       if (nameKey(r.model) !== it.key) continue;
       codes.single.add(r.ap);
       if (r.aq) codes.part.add(r.aq);
+      // 같은 상품의 바뀐 코드(완성품 코드·점 붙은 코드)도 단품 재고로 센다
+      for (const c of resolver.extraStockCodes(r)) codes.single.add(c);
     }
     if (!codes.single.size) {
       for (const [code, h] of base.history) if (h.model && nameKey(h.model) === it.key) codes.single.add(code);
@@ -451,29 +457,45 @@ const blockFor = (market, price, marketMap) => {
 };
 
 // overrides: { products: {code: {cat, model, include}}, priceMap: {code: 가격세팅 모델명 | ''} }
-export function plan(base, salesRows, price, overrides = {}) {
+// stock: 재고 파일(없으면 매출현황 재고 시트) — 바뀐 코드를 상품명으로 알아보는 데 쓴다
+export function plan(base, salesRows, price, overrides = {}, stock = null) {
   const ov = overrides.products || {};
   const pm = overrides.priceMap || {};
   const seen = new Set();
   const skipped = { dup: [], dupInUpload: [], noDate: [], excluded: [] };
   const products = new Map();
   const rows = [];
+  const resolver = buildCodeResolver(base, stock || base.sheetStock, salesRows);
+  const aliases = new Map(); // 원래 코드 → {to, how, model}
 
-  for (const s of salesRows) {
-    if (!s.date) { skipped.noDate.push(s); continue; }
-    const key = s.orderId || `${s.file}#${s.line}`;
-    if (s.orderId && base.orderIds.has(s.orderId)) { skipped.dup.push(s); continue; }
-    if (seen.has(key)) { skipped.dupInUpload.push(s); continue; }
+  for (const raw of salesRows) {
+    if (!raw.date) { skipped.noDate.push(raw); continue; }
+    const key = raw.orderId || `${raw.file}#${raw.line}`;
+    if (raw.orderId && base.orderIds.has(raw.orderId)) { skipped.dup.push(raw); continue; }
+    if (seen.has(key)) { skipped.dupInUpload.push(raw); continue; }
     seen.add(key);
+
+    // 같은 상품의 다른 코드(바뀐 코드·완성품 코드·부품 코드)는 월 시트 AP 코드로 바꿔 쓴다.
+    // 월 시트·일별 SUMIFS가 AP 코드 글자로만 세기 때문이다. 직접 분류한 코드는 건드리지 않는다.
+    let s = raw;
+    const res = ov[raw.code] && ov[raw.code].cat ? null : resolver.resolve(raw.code);
+    if (res && res.row.ap !== raw.code) {
+      const how = res.how === '같은 코드' ? '월 시트 부품(AQ) 코드' : res.how;
+      if (!aliases.has(raw.code)) aliases.set(raw.code, { from: raw.code, to: res.row.ap, how, model: res.row.model, count: 0, qty: 0 });
+      const a = aliases.get(raw.code);
+      a.count++; a.qty += raw.qty;
+      s = { ...raw, code: res.row.ap, origCode: raw.code };
+    }
 
     let p = products.get(s.code);
     if (!p) {
       const h = base.history.get(s.code) || {};
       const mc = base.monthCodes.get(s.code) || {};
       const o = ov[s.code] || {};
-      const cat = o.cat || h.cat || mc.cat || '';
-      const model = o.model || h.model || mc.model || '';
-      const known = Boolean((h.cat || mc.cat) && (h.model || mc.model));
+      const rr = res && res.row.ap === s.code ? res.row : (resolver.resolve(s.code) || {}).row;
+      const cat = o.cat || h.cat || mc.cat || (rr && rr.cat) || '';
+      const model = o.model || h.model || mc.model || (rr && rr.model) || '';
+      const known = Boolean((h.cat || mc.cat || rr) && (h.model || mc.model || rr));
       let match = null;
       if (pm[s.code] !== undefined) {
         const it = pm[s.code] && price ? price.items.find((x) => x.name === pm[s.code]) : null;
@@ -482,7 +504,7 @@ export function plan(base, salesRows, price, overrides = {}) {
         match = matchPrice(s.code, [model, h.model, mc.model, s.name], h.cost, price);
       }
       p = {
-        code: s.code, name: s.name, cat, model, known,
+        code: s.code, name: s.name, cat, model, known, aliases: [],
         include: o.include != null ? o.include : known,
         histCost: h.cost ?? null,
         match,
@@ -492,6 +514,7 @@ export function plan(base, salesRows, price, overrides = {}) {
     }
     p.count++;
     p.qty += s.qty;
+    if (s.origCode && !p.aliases.includes(s.origCode)) p.aliases.push(s.origCode);
     if (!p.include || !p.cat || !p.model) { skipped.excluded.push(s); continue; }
 
     const blk = blockFor(s.market, price, overrides.marketMap);
@@ -517,7 +540,7 @@ export function plan(base, salesRows, price, overrides = {}) {
     });
   }
   rows.sort((a, b) => a.serial - b.serial); // 같은 날은 판매 파일 순서 그대로(안정 정렬)
-  return { rows, skipped, products: [...products.values()] };
+  return { rows, skipped, products: [...products.values()], aliases: [...aliases.values()], resolver };
 }
 
 // ---------------------------------------------------------------- 쓰기
@@ -575,6 +598,27 @@ function rowsWithDailyFormula(sh) {
     if (c && c.f && c.f.text && c.f.text !== '0') out.push(r);
   }
   return out;
+}
+
+// 월 시트 AR(단품 재고) = SUMIF(재고, AP 코드). 같은 상품인데 재고 파일에서 코드가 다른 줄
+// (완성품 코드, 점이 붙은 코드)은 세지 못하므로 그 코드의 SUMIF를 더해 둔다. 이미 있으면 건너뛴다.
+function addAliasStock(sh, sst, resolver, report, sheetName) {
+  if (!resolver) return;
+  const byAp = new Map(resolver.rows.map((r) => [r.ap, r]));
+  for (const [r, row] of sh.rows) {
+    const ap = cellText(row.cells.get(42), sst);
+    const cell = row.cells.get(44); // AR
+    if (!ap || !cell || !cell.f || !cell.f.text) continue;
+    const mr = byAp.get(ap);
+    if (!mr) continue;
+    const m = /SUMIF\((재고!\$B\$3:\$B\$\d+),[^,]+,(재고!\$J\$3:\$J\$\d+)\)/.exec(cell.f.text);
+    if (!m) continue;
+    const extra = resolver.extraStockCodes(mr).filter((c) => !cell.f.text.includes(`"${c}"`));
+    if (!extra.length) continue;
+    cell.f.text += extra.map((c) => `+SUMIF(${m[1]},"${c.replace(/"/g, '""')}",${m[2]})`).join('');
+    cell.v = null;
+    report.push(`${sheetName} AR${r} ${mr.model}: ${extra.join(', ')} 재고를 단품 재고에 더함`);
+  }
 }
 
 function updateCosts(sh, sst, costByCode, report, sheetName) {
@@ -919,7 +963,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
   const { stock = null, price = null } = opts;
   const wb = base.wb;
   const zip = wb.zip;
-  const report = { added: planned.rows.length, sheetsCreated: [], sheetsUpdated: [], costChanges: [], warnings: [], stockRows: 0 };
+  const report = { added: planned.rows.length, sheetsCreated: [], sheetsUpdated: [], costChanges: [], warnings: [], stockRows: 0, stockAliases: [], codeAliases: planned.aliases || [] };
   const oldLast = base.lastRow;
   const newLast = oldLast + planned.rows.length;
 
@@ -967,6 +1011,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
   }
   for (const p of planned.products) if (p.match && p.match.item.cost != null) costByCode.set(p.code, p.match.item.cost);
   const monthsNeeded = [...new Set(planned.rows.map((r) => r.yymm))].sort((a, b) => a - b);
+  const stockResolver = stock ? buildCodeResolver(base, stock, []) : null;
   let wbXml = wb.wbXml;
   let relsXml = wb.relsXml;
   let ctXml = await readText(zip, '[Content_Types].xml');
@@ -981,6 +1026,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
         .filter((sv) => { const d = ymdFromSerial(sv); return yymm(d.y, d.m) === ym; });
       const { filled } = refreshMonthSheet(sh, wb.sst, ym, Math.max(...inMonth));
       updateCosts(sh, wb.sst, costByCode, report.costChanges, name);
+      addAliasStock(sh, wb.sst, stockResolver, report.stockAliases, name);
       texts.set(name, serializeSheet(sh));
       report.sheetsUpdated.push(`${name} (날짜 칸 ${filled}개 채움)`);
     } else {
@@ -989,6 +1035,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
       const xml = buildMonthSheet(texts.get(String(tpl)), wb.sst, tpl, ym);
       const sh = parseSheet(xml);
       updateCosts(sh, wb.sst, costByCode, report.costChanges, name);
+      addAliasStock(sh, wb.sst, stockResolver, report.stockAliases, name);
       texts.set(name, serializeSheet(sh));
       newSheets.push({ name, after: String(tpl) });
       months = [...months, ym].sort((a, b) => a - b);
@@ -997,6 +1044,17 @@ export async function apply(JSZip, base, planned, opts = {}) {
     const listed = base.monthSheetCodes.get(ym) || base.monthSheetCodes.get(months.filter((m) => m < ym).pop()) || new Set();
     const miss = [...new Set(planned.rows.filter((r) => r.yymm === ym && !listed.has(r.code)).map((r) => `${r.code} ${r.model}`))];
     if (miss.length) report.warnings.push(`${name} 시트 상품 목록에 없는 코드(월 시트 합계에서 빠짐): ${miss.join(', ')}`);
+  }
+
+  // 4-1. 판매가 없는 날에도 재고를 교체했으면 최신 월 시트의 단품 재고에 바뀐 코드를 더한다
+  if (stockResolver) {
+    const latest = String(Math.max(...months));
+    if (texts.has(latest) && !monthsNeeded.includes(+latest)) {
+      const sh = parseSheet(texts.get(latest));
+      const before = report.stockAliases.length;
+      addAliasStock(sh, wb.sst, stockResolver, report.stockAliases, latest);
+      if (report.stockAliases.length !== before) texts.set(latest, serializeSheet(sh));
+    }
   }
 
   // 5. 일별
