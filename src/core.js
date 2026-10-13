@@ -252,6 +252,7 @@ export function readPriceFile(XLSX, buf, fileName) {
       name: String(name).trim(),
       category: r[h.idx['카테고리']] == null ? '' : String(r[h.idx['카테고리']]).trim(),
       settle: num(h.idx['정산가']),
+      benefit: num(h.idx['최대혜택가']),
       cost: num(h.idx['원가']),
       market,
       key: nameKey(name),
@@ -598,6 +599,50 @@ function rowsWithDailyFormula(sh) {
     if (c && c.f && c.f.text && c.f.text !== '0') out.push(r);
   }
   return out;
+}
+
+// 월 시트 AX열에 '판매가'(가격세팅 최대혜택가)를 넣는다. 상품은 판매로 잇힌 매칭(직접 지정 포함)을 먼저,
+// 없으면 모델명 토큰이 정확히 같은 가격세팅 상품 하나를 쓴다. 못 찾으면 '-'.
+const AX = 50;
+function writeSalePrice(sh, sst, price, products, report) {
+  const byCode = new Map();
+  for (const p of products || []) if (p.match && p.match.item) byCode.set(p.code, p.match.item);
+  const byKey = new Map();
+  for (const it of price.items) { const k = it.key; byKey.set(k, byKey.has(k) ? null : it); }
+  const st = (r, c) => { const x = getCell(sh, r, c); return x ? getAttr(x.attrs, 's') : null; };
+  let header = null;
+  for (const [r, row] of sh.rows) if (cellText(row.cells.get(42), sst) === '코드') { header = r; break; }
+  if (header == null) return 0;
+  const hc = ensureCell(sh, header, AX, st(header, 47));
+  setText(hc, '판매가');
+  setAttr(hc.attrs, 's', st(header, 47));
+  let n = 0;
+  const rowNums = [...sh.rows.keys()].filter((r) => r > header).sort((a, b) => a - b);
+  for (const r of rowNums) {
+    const row = sh.rows.get(r);
+    const ap = cellText(row.cells.get(42), sst);
+    const model = cellText(row.cells.get(2), sst);
+    if (!ap || ap === '코드' || !model) continue;
+    const it = byCode.get(ap) || byKey.get(nameKey(model)) || null;
+    const cell = ensureCell(sh, r, AX, st(r, 47));
+    setAttr(cell.attrs, 's', st(r, 47));
+    if (it && it.benefit != null) { setNumber(cell, Math.round(it.benefit)); report.filled++; }
+    else { setText(cell, '-'); report.missing.push(model.trim()); }
+    n++;
+  }
+  return n;
+}
+
+// <cols>에서 한 열의 너비를 바꾼다(그 열만 따로 정의돼 있을 때)
+function setColWidth(xml, col, width) {
+  return xml.replace(new RegExp(`<col min="${col}" max="${col}"([^>]*)/>`), (m, a) => {
+    const at = parseAttrs(a);
+    const w = +getAttr(at, 'width');
+    if (w >= width) return m;
+    setAttr(at, 'width', String(width));
+    setAttr(at, 'customWidth', '1');
+    return `<col min="${col}" max="${col}"${attrsToStr(at.filter(([k]) => k !== 'min' && k !== 'max'))}/>`;
+  });
 }
 
 // 월 시트 AR(단품 재고) = SUMIF(재고, AP 코드). 같은 상품인데 재고 파일에서 코드가 다른 줄
@@ -963,7 +1008,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
   const { stock = null, price = null } = opts;
   const wb = base.wb;
   const zip = wb.zip;
-  const report = { added: planned.rows.length, sheetsCreated: [], sheetsUpdated: [], costChanges: [], warnings: [], stockRows: 0, stockAliases: [], codeAliases: planned.aliases || [] };
+  const report = { salePrice: { sheet: null, filled: 0, missing: [] }, added: planned.rows.length, sheetsCreated: [], sheetsUpdated: [], costChanges: [], warnings: [], stockRows: 0, stockAliases: [], codeAliases: planned.aliases || [] };
   const oldLast = base.lastRow;
   const newLast = oldLast + planned.rows.length;
 
@@ -1054,6 +1099,21 @@ export async function apply(JSZip, base, planned, opts = {}) {
       const before = report.stockAliases.length;
       addAliasStock(sh, wb.sst, stockResolver, report.stockAliases, latest);
       if (report.stockAliases.length !== before) texts.set(latest, serializeSheet(sh));
+    }
+  }
+
+  // 4-2. 최신 월 시트 AX열 '판매가' = 가격세팅 최대혜택가(없으면 '-')
+  if (price) {
+    const latest = String(Math.max(...months));
+    if (texts.has(latest)) {
+      const sh = parseSheet(texts.get(latest));
+      report.salePrice.sheet = latest;
+      const n = writeSalePrice(sh, wb.sst, price, planned.products, report.salePrice);
+      if (n) {
+        let x = serializeSheet(sh);
+        x = setColWidth(x, 50, 11);
+        texts.set(latest, x);
+      }
     }
   }
 

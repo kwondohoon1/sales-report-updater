@@ -367,6 +367,7 @@ async function build() {
       ...report.sheetsUpdated.map((s) => `월 시트 갱신: ${s}`),
       report.stockRows ? `재고 시트 교체: ${report.stockRows.toLocaleString()}줄` : null,
       report.daily ? `일별 시트: ${report.daily}일치 표(기준일·전 영업일, 수식으로)` : null,
+      report.salePrice && report.salePrice.sheet ? `판매가(AX열, 최대혜택가): ${report.salePrice.sheet} 시트 ${report.salePrice.filled}개 입력${report.salePrice.missing.length ? `, 가격세팅에 없어 '-' ${report.salePrice.missing.length}개` : ''}` : null,
       ...report.costChanges.map((s) => `원가 갱신: ${s}`),
       ...(report.codeAliases || []).map((a) => `코드 변환: ${a.from} → ${a.to} (${a.model}) ${a.qty}개`),
       ...(report.stockAliases || []).map((s) => `재고 코드 추가: ${s}`),
