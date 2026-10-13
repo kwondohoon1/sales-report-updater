@@ -601,7 +601,7 @@ function rowsWithDailyFormula(sh) {
   return out;
 }
 
-// 월 시트 AX열에 '판매가'(가격세팅 최대혜택가)를 넣는다. 상품은 판매로 잇힌 매칭(직접 지정 포함)을 먼저,
+// 월 시트 AX열에 '정산가'(가격세팅 G마켓 기준 정산가)를 넣는다. 마켓별 정산액은 몇 원 차이라 기준 정산가 하나를 쓴다. 상품은 판매로 잇힌 매칭(직접 지정 포함)을 먼저,
 // 없으면 모델명 토큰이 정확히 같은 가격세팅 상품 하나를 쓴다. 못 찾으면 '-'.
 const AX = 50;
 function writeSalePrice(sh, sst, price, products, report) {
@@ -614,7 +614,7 @@ function writeSalePrice(sh, sst, price, products, report) {
   for (const [r, row] of sh.rows) if (cellText(row.cells.get(42), sst) === '코드') { header = r; break; }
   if (header == null) return 0;
   const hc = ensureCell(sh, header, AX, st(header, 47));
-  setText(hc, '판매가');
+  setText(hc, '정산가');
   setAttr(hc.attrs, 's', st(header, 47));
   let n = 0;
   const rowNums = [...sh.rows.keys()].filter((r) => r > header).sort((a, b) => a - b);
@@ -626,7 +626,7 @@ function writeSalePrice(sh, sst, price, products, report) {
     const it = byCode.get(ap) || byKey.get(nameKey(model)) || null;
     const cell = ensureCell(sh, r, AX, st(r, 47));
     setAttr(cell.attrs, 's', st(r, 47));
-    if (it && it.benefit != null) { setNumber(cell, Math.round(it.benefit)); report.filled++; }
+    if (it && it.settle != null) { setNumber(cell, Math.round(it.settle)); report.filled++; }
     else { setText(cell, '-'); report.missing.push(model.trim()); }
     n++;
   }
@@ -1102,7 +1102,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
     }
   }
 
-  // 4-2. 최신 월 시트 AX열 '판매가' = 가격세팅 최대혜택가(없으면 '-')
+  // 4-2. 최신 월 시트 AX열 '정산가' = 가격세팅 정산가(G마켓 기준, 없으면 '-')
   if (price) {
     const latest = String(Math.max(...months));
     if (texts.has(latest)) {
