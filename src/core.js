@@ -25,6 +25,7 @@ export const DEFAULT_MARKET_BLOCK = {
   '쿠팡': '쿠팡',
   '컴퓨존': '컴퓨존',
   '자사몰': '자사몰',
+  '11번가': '11번가', '11st': '11번가',
 };
 
 const CATEGORY_ORDER = ['RAM', 'SSD', 'VGA'];
