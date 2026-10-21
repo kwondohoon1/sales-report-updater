@@ -83,6 +83,23 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
   if (!tables.length) { add('error', '입력 누락', PS, '', '', '머리글(모델명·정산가·원가)을 찾지 못함'); return finish(items); }
   const params = readParams(grid, tables[0].headerRow);
   const main = tables[0];
+  // 상품마다 실제 세팅한 표('상태'=세팅, 없으면 첫 표). 단종은 가격 규칙 검사에서 뺀다
+  const basisOf = new Map(), goneKeys = new Set();
+  for (const t of tables) for (const row of t.rows) {
+    const k = nameKey(row.model);
+    if (row.status === '단종') goneKeys.add(k);
+    if (row.status === '세팅' && !basisOf.has(k)) basisOf.set(k, { t, row });
+  }
+  // '세팅' 표시가 없는 상품: 상태 열이 있는 파일이면 자사몰 기준 표(동일스펙 사이트와 같게), 없으면 첫 표
+  const hasState = tables.some((t) => t.col['상태']);
+  const fallback = (hasState && tables.find((t) => /자사몰/.test(t.label))) || main;
+  for (const row of main.rows) {
+    const k = nameKey(row.model);
+    if (basisOf.has(k)) continue;
+    const fr = fallback.rows.find((x) => nameKey(x.model) === k);
+    basisOf.set(k, fr ? { t: fallback, row: fr } : { t: main, row });
+  }
+  const isBasis = (t, row) => { const b = basisOf.get(nameKey(row.model)); return !!b && b.t === t && !goneKeys.has(nameKey(row.model)); };
 
   // 파라미터 범위
   for (const [label, row] of Object.entries(params.rows)) {
@@ -103,6 +120,8 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
   for (const t of tables) {
     for (const row of t.rows) {
       const p = row.model;
+      // 세팅하지 않은 표(같은 정산가를 다른 마켓에 맞춘 참고용)와 단종 상품은 가격·마진 규칙을 보지 않는다
+      if (!isBasis(t, row)) continue;
       const A = (name) => addrOf(t.col[name], row.r);
       const E = row.v('입력가'), F = row.v('노출가(2차혜택가)'), G = row.v('최대혜택가'), H = row.v('정산가'), I = row.v('원가');
       const J = row.v('마진'), K = row.v('마진율'), D = row.v('기준');
@@ -123,8 +142,10 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
       // 마켓 블록
       for (const b of t.blocks) {
         const list = row.at(b.list), expo = row.at(b.expo), settle = row.at(b.settle), diff = row.at(b.diff);
-        if (b.isBase) {
-          if (isNum(list) && isNum(expo) && isNum(F) && isNum(G) && !(list >= expo - 0.5 && expo >= F - 0.5 && F >= G - 0.5)) add('error', '가격 오류', PS, addrOf(b.list, row.r), p, `가격 순서가 깨짐: 등재가 ${fmt(list)} ≥ 노출가 ${fmt(expo)} ≥ 2차혜택가 ${fmt(F)} ≥ 최대혜택가 ${fmt(G)} 이어야 함`);
+        // 가격 순서는 그 표의 기준 마켓 묶음에서만 (G마켓 기준 표 → G마켓·옥션, 하이마트 기준 표 → 하이마트)
+        if (b.name.replace(/[\s·]/g, '').includes(t.label.replace(/\s*기준$/, '').replace(/\s/g, ''))) {
+          // 노출가(MD쿠폰 적용)와 2차혜택가(선택·중복쿠폰 적용)는 서로 다른 할인이라 둘 사이 순서는 보지 않는다
+          if (isNum(list) && isNum(expo) && isNum(F) && isNum(G) && !(list >= expo - 0.5 && list >= F - 0.5 && expo >= G - 0.5 && F >= G - 0.5)) add('error', '가격 오류', PS, addrOf(b.list, row.r), p, `가격 순서가 깨짐: 등재가 ${fmt(list)} ≥ 노출가 ${fmt(expo)}·2차혜택가 ${fmt(F)} ≥ 최대혜택가 ${fmt(G)} 이어야 함`);
         }
         if (isNum(H) && (list == null || list === '')) add('error', '정산 불일치', PS, addrOf(b.list, row.r), p, `${b.name} 등재가가 비어 있음`);
         if (notTens(list)) add('warn', '가격 오류', PS, addrOf(b.list, row.r), p, `${b.name} 등재가 ${fmt(list)}이 10원 단위가 아님`);
@@ -233,7 +254,8 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
       for (let r = hdr + 1; r <= g.maxRow; r++) {
         const name = g.get(cName, r);
         if (!name) continue;
-        const m = findRow(name);
+        if (goneKeys.has(nameKey(name))) continue;   // 단종
+        const m = (basisOf.get(nameKey(name)) || {}).row;
         if (!m) { add('warn', '시트 간 불일치', LP, addrOf(cName, r), name, '정산가세팅에 없는 상품'); continue; }
         const cur = [['노출가', cExpo, m.v('노출가(2차혜택가)')], ['최대혜택가', cBen, m.v('최대혜택가')], ['원가', cCost, m.v('원가')]];
         for (const [lab, c, want] of cur) {
@@ -255,7 +277,9 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
 
   // ------------------------------------------------------------ 6. G마켓_프로모션
   const PR = wb.SheetNames.find((n) => /프로모션/.test(n));
-  if (PR) {
+  // 이름에 '종료'가 붙은 프로모션 시트는 지난 행사 기록이라 지금 세팅과 비교하지 않는다
+  if (PR && /종료/.test(PR)) add('info', '시트 간 불일치', PR, '', '', `'${PR}'는 종료된 행사라 지금 가격과 비교하지 않음`);
+  else if (PR) {
     const ws = wb.Sheets[PR];
     const g = sheetGrid(ws, (c, r) => val(PR, c, r));
     const hdr = g.findRow((cells) => cells.includes('모델명') && cells.includes('노출가') && cells.includes('등재가'));
@@ -310,7 +334,7 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
   }
 
   // ------------------------------------------------------------ 7. 매출현황 대조
-  if (ctx.base) baseChecks(ctx.base, main, gmBlock, params, add, PS, addrOf);
+  if (ctx.base) baseChecks(ctx.base, main, gmBlock, params, add, PS, addrOf, basisOf, goneKeys);
 
   return finish(items, { tables: tables.map((t) => ({ label: t.label, rows: t.rows.length })), params });
 }
@@ -413,6 +437,7 @@ function findTables(g) {
       if (model == null || model === '') break;
       rows.push({
         r: rr, model: String(model).trim(),
+        status: col['상태'] ? String(g.get(col['상태'], rr) ?? '').trim() : '',
         v: (name) => (col[name] ? g.get(col[name], rr) : null),
         at: (c) => (c ? g.get(c, rr) : null),
       });
@@ -425,10 +450,13 @@ function findTables(g) {
 // 머리글 위쪽의 파라미터 표: A열 이름, 1행 마켓 이름, D~ 값
 function readParams(g, firstHeaderRow) {
   const cols = {};
-  g.rowCells(1).forEach((h, i) => { if (h && i >= 1) cols[h] = i + 1; });
+  // 항목 이름 열 = 1행의 '마켓 조건' 칸 (앞에 '상태' 열이 끼면 B열). 그 오른쪽 이름이 마켓
+  const head = g.rowCells(1);
+  const lc = Math.max(0, head.findIndex((h) => h && h.replace(/\s/g, '') === '마켓조건'));
+  head.forEach((h, i) => { if (h && i > lc) cols[h] = i + 1; });
   const rows = {};
   for (let r = 2; r < firstHeaderRow - 1; r++) {
-    const label = g.get(1, r);
+    const label = g.get(lc + 1, r);
     if (label == null || label === '') continue;
     const values = {};
     for (const [mk, c] of Object.entries(cols)) values[mk] = g.get(c, r);
@@ -446,6 +474,8 @@ function patternChecks(wb, add) {
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
     if (!ws['!ref']) continue;
+    // 최저가비교는 동일스펙 사이트가 상품별 기준 마켓(G마켓·자사몰·하이마트) 조건으로 수식을 넣어 행마다 다르다
+    if (name.replace(/\s/g, '') === '최저가비교') continue;
     const { c2, r2 } = XLSXRange(ws['!ref']);
     for (let c = 1; c <= c2; c++) {
       let run = [];
@@ -478,13 +508,18 @@ function patternChecks(wb, add) {
 
 // ---------------------------------------------------------------- 매출현황 대조
 
-function baseChecks(base, main, gmBlock, params, add, PS, addrOf) {
+function baseChecks(base, main0, gmBlock0, params, add, PS, addrOf, basisOf, goneKeys) {
   const dates = [...base.byDate.keys()];
   if (!dates.length) return;
   const latest = Math.max(...dates);
   const since = latest - RECENT_DAYS;
-  for (const row of main.rows) {
-    const key = nameKey(row.model);
+  for (const row0 of main0.rows) {
+    const key = nameKey(row0.model);
+    if (goneKeys && goneKeys.has(key)) continue;
+    // 그 상품을 세팅한 표로 비교 (없으면 첫 표)
+    const bs = (basisOf && basisOf.get(key)) || { t: main0, row: row0 };
+    const main = bs.t, row = bs.row;
+    const gmBlock = main.blocks.find((b) => b.isBase) || gmBlock0;
     const codes = new Set();
     for (const r of base.monthRows) if (nameKey(r.model) === key) codes.add(r.ap);
     if (!codes.size) for (const [code, h] of base.history) if (h.model && nameKey(h.model) === key) codes.add(code);

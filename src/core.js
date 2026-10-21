@@ -17,7 +17,7 @@ export const SALES_HEADERS = ['모델NO', '제품명', '결제금액', '수량',
   '정산', '원가', '이익', '%', '구매자', '판매사이트', '마켓주문번호', '출고지시일', '주문번호', '상태',
   '카테고리', '모델명', '년월', '주'];
 
-// 판매사이트 → 가격세팅 정산 블록 이름. 없는 마켓은 G마켓 기준 정산가를 쓴다.
+// 판매사이트 → 가격세팅 정산 블록 이름. 없는 마켓은 그 상품 세팅 표의 정산가를 쓴다.
 export const DEFAULT_MARKET_BLOCK = {
   '지마켓': 'G마켓·옥션', 'G마켓': 'G마켓·옥션', '옥션': 'G마켓·옥션',
   '하이마트': '하이마트',
@@ -224,42 +224,65 @@ export function readStockFile(XLSX, buf, fileName) {
   throw new Error(`${fileName}: 재고 머리글(상품코드·가용수량)을 찾지 못했습니다.`);
 }
 
+// 정산가세팅에는 표가 여럿(G마켓 기준·자사몰 기준·하이마트 기준) 있을 수 있다. 같은 행 = 같은 상품.
+// 상품마다 A열 '상태'가 '세팅'인 표가 실제로 세팅한 가격이라 그 표의 정산가·마켓별 정산액을 쓴다.
+// '세팅' 표시가 없으면 첫 표(G마켓 기준). 어느 표에서든 '단종'이면 gone 표시만 한다(정산은 그대로).
 export function readPriceFile(XLSX, buf, fileName) {
   const wb = XLSX.read(buf, { type: 'array', raw: true });
   const ws = wb.Sheets['정산가세팅'];
   if (!ws) throw new Error(`${fileName}: '정산가세팅' 시트가 없습니다.`);
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-  const h = headerIndex(rows, ['모델명', '정산가', '원가']);
-  if (!h) throw new Error(`${fileName}: 정산가세팅의 머리글(모델명·정산가·원가)을 찾지 못했습니다.`);
-  const head = rows[h.row].map((x) => (x == null ? '' : String(x).trim()));
-  const group = (rows[h.row - 1] || []).map((x) => (x == null ? '' : String(x).trim()));
-  const blocks = {};
-  head.forEach((v, j) => {
-    if (v !== '정산액') return;
-    for (let k = j; k >= 0; k--) {
-      if (group[k]) { blocks[group[k]] = j; break; }
-    }
-  });
-  const items = [];
-  for (let i = h.row + 1; i < rows.length; i++) {
-    const r = rows[i];
-    const name = r[h.idx['모델명']];
-    if (name == null || String(name).trim() === '') break; // 첫 표만 읽는다
-    const num = (j) => (j == null || typeof r[j] !== 'number' ? null : r[j]);
-    const market = {};
-    for (const [label, j] of Object.entries(blocks)) market[label] = num(j);
-    items.push({
-      name: String(name).trim(),
-      category: r[h.idx['카테고리']] == null ? '' : String(r[h.idx['카테고리']]).trim(),
-      settle: num(h.idx['정산가']),
-      benefit: num(h.idx['최대혜택가']),
-      cost: num(h.idx['원가']),
-      market,
-      key: nameKey(name),
+  const txt = (x) => (x == null ? '' : String(x).trim());
+  const tables = [];
+  for (let i = 0; i < rows.length; i++) {
+    const head = (rows[i] || []).map(txt);
+    if (!(head.includes('모델명') && head.includes('정산가') && head.includes('원가'))) continue;
+    const idx = {};
+    head.forEach((h, j) => { if (h && !(h in idx)) idx[h] = j; });
+    const group = (rows[i - 1] || []).map(txt);
+    const label = group.find((x) => /기준$/.test(x)) || `표 ${tables.length + 1}`;
+    const blocks = {};
+    head.forEach((v, j) => {
+      if (v !== '정산액') return;
+      for (let k = j; k >= 0; k--) if (group[k] && !/기준$|^정산$/.test(group[k])) { blocks[group[k]] = j; break; }
     });
+    const items = [];
+    for (let r = i + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      const name = row[idx['모델명']];
+      if (name == null || String(name).trim() === '') break; // 표 하나는 빈 모델 행에서 끝
+      const num = (j) => (j == null || typeof row[j] !== 'number' ? null : row[j]);
+      const market = {};
+      for (const [lb, j] of Object.entries(blocks)) market[lb] = num(j);
+      items.push({
+        name: String(name).trim(),
+        category: txt(row[idx['카테고리']]),
+        status: idx['상태'] == null ? '' : txt(row[idx['상태']]),
+        settle: num(idx['정산가']),
+        benefit: num(idx['최대혜택가']),
+        cost: num(idx['원가']),
+        market,
+        key: nameKey(name),
+      });
+    }
+    tables.push({ label, blocks: Object.keys(blocks), items });
+    i += items.length;
   }
-  if (!items.length) throw new Error(`${fileName}: 정산가세팅에 상품 행이 없습니다.`);
-  return { file: fileName, items, blocks: Object.keys(blocks) };
+  if (!tables.length) throw new Error(`${fileName}: 정산가세팅의 머리글(모델명·정산가·원가)을 찾지 못했습니다.`);
+  const first = tables[0];
+  if (!first.items.length) throw new Error(`${fileName}: 정산가세팅에 상품 행이 없습니다.`);
+  // '세팅' 표시가 없는 상품: 상태 열이 있는 파일이면 자사몰 기준 표(동일스펙 사이트와 같게), 없으면 첫 표
+  const hasState = tables.some((t) => t.items.some((x) => x.status));
+  const fbIdx = hasState ? Math.max(0, tables.findIndex((t) => /자사몰/.test(t.label))) : 0;
+  const items = first.items.map((it0, n) => {
+    const same = tables.map((t) => t.items[n]).filter((x) => x && x.key === it0.key);
+    const f = tables[fbIdx].items[n];
+    const pick = same.find((x) => x.status === '세팅') || (f && f.key === it0.key ? f : it0);
+    const t = tables[tables.findIndex((tb) => tb.items[n] === pick)];
+    return { ...pick, basis: t.label, marked: pick.status === '세팅', gone: same.some((x) => x.status === '단종') };
+  });
+  const blocks = [...new Set(tables.flatMap((t) => t.blocks))];
+  return { file: fileName, items, blocks, tables: tables.map((t) => t.label) };
 }
 
 // ---------------------------------------------------------------- 기준 워크북 읽기
@@ -523,7 +546,7 @@ export function plan(base, salesRows, price, overrides = {}, stock = null) {
     if (p.match) {
       const it = p.match.item;
       if (blk && it.market[blk] != null) { unit = it.market[blk]; settleFrom = blk; }
-      else if (it.settle != null) { unit = it.settle; settleFrom = '정산가(G마켓 기준)'; }
+      else if (it.settle != null) { unit = it.settle; settleFrom = `정산가(${it.basis || 'G마켓 기준'})`; }
     }
     const cost = p.match && p.match.item.cost != null ? p.match.item.cost : p.histCost;
     const { y, m, d } = s.date;
@@ -601,7 +624,7 @@ function rowsWithDailyFormula(sh) {
   return out;
 }
 
-// 월 시트 AX열에 '정산가'(가격세팅 G마켓 기준 정산가)를 넣는다. 마켓별 정산액은 몇 원 차이라 기준 정산가 하나를 쓴다. 상품은 판매로 잇힌 매칭(직접 지정 포함)을 먼저,
+// 월 시트 AX열에 '정산가'(가격세팅에서 그 상품을 '세팅'한 표의 정산가, 없으면 G마켓 기준)를 넣는다. 마켓별 정산액은 몇 원 차이라 기준 정산가 하나를 쓴다. 상품은 판매로 잇힌 매칭(직접 지정 포함)을 먼저,
 // 없으면 모델명 토큰이 정확히 같은 가격세팅 상품 하나를 쓴다. 못 찾으면 '-'.
 const AX = 50;
 function writeSalePrice(sh, sst, price, products, report) {
@@ -1102,7 +1125,7 @@ export async function apply(JSZip, base, planned, opts = {}) {
     }
   }
 
-  // 4-2. 최신 월 시트 AX열 '정산가' = 가격세팅 정산가(G마켓 기준, 없으면 '-')
+  // 4-2. 최신 월 시트 AX열 '정산가' = 가격세팅 정산가(상품별 세팅 표, 없으면 '-')
   if (price) {
     const latest = String(Math.max(...months));
     if (texts.has(latest)) {

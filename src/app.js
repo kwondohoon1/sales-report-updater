@@ -248,7 +248,7 @@ function renderCheck() {
   const noSettle = p.rows.filter((r) => r.settle == null);
   if (noSettle.length) warns.push(`정산을 못 채운 행 ${noSettle.length}개 — 상품 표에서 가격세팅 매칭을 골라 주세요.`);
   const fallback = [...new Set(p.rows.filter((r) => r.settleFrom && r.settleFrom.startsWith('정산가')).map((r) => r.market))];
-  if (fallback.length) warns.push(`가격세팅에 정산 블록이 없는 판매사이트(${fallback.join(', ')})는 G마켓 기준 정산가를 썼습니다.`);
+  if (fallback.length) warns.push(`가격세팅에 정산 블록이 없는 판매사이트(${fallback.join(', ')})는 그 상품을 세팅한 표의 정산가를 썼습니다.`);
   if (p.skipped.noDate.length) warns.push(`출고일이 비어 있어 뺀 행 ${p.skipped.noDate.length}개`);
   $('#warnings').replaceChildren(...(warns.length ? [el('div', { class: 'note warn' }, el('ul', {}, warns.map((w) => el('li', {}, w))))] : []));
 
