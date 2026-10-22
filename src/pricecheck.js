@@ -429,7 +429,9 @@ function findTables(g) {
       let name = '';
       for (let k = i; k >= 0; k--) if (above[k] && !/기준$|^정산$/.test(above[k])) { name = above[k]; break; }
       const settle = i + 1;
-      blocks.push({ name, list: settle - 2, expo: settle - 1, settle, diff: settle + 1, isBase: /G마켓|지마켓/.test(name) });
+      // 묶음 = 등재가(세팅) · 노출가 · (최대혜택가) · 정산액 · 차이 — 머리글로 자리를 찾는다
+      const back = (h) => { for (let k = i - 1; k >= Math.max(0, i - 4); k--) if (cells[k] === h) return k + 1; return null; };
+      blocks.push({ name, list: back('등재가(세팅)') || settle - 2, expo: back('노출가') || settle - 1, max: back('최대혜택가'), settle, diff: settle + 1, isBase: /G마켓|지마켓/.test(name) });
     });
     const rows = [];
     for (let rr = r + 1; rr <= g.maxRow; rr++) {
