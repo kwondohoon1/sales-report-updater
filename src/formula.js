@@ -295,6 +295,28 @@ export function evaluate(ast, getCellValue, sheet) {
         return acc;
       }
       case 'NOT': { const t = truthy(ev(args[0])); return isErr(t) ? t : !t; }
+      // INDEX(한 줄·한 칸짜리 범위, n) / MATCH(값, 범위, 0) — 가격세팅 마켓별상품코드의 '세팅 등재가'에 쓰임
+      case 'INDEX': {
+        const r = ev(args[0]);
+        if (isErr(r) || isUnsupported(r)) return r;
+        if (!(r && typeof r === 'object' && 'range' in r) || args.length > 2) return { unsupported: true, fn: 'INDEX' };
+        const i = ev(args[1]);
+        if (isErr(i) || isUnsupported(i)) return i;
+        if (typeof i !== 'number' || i < 1 || i > r.range.length) return ERR('#REF!');
+        const v = r.range[Math.trunc(i) - 1];
+        return v == null ? 0 : v;
+      }
+      case 'MATCH': {
+        const v = ev(args[0]);
+        if (isErr(v) || isUnsupported(v)) return v;
+        const r = ev(args[1]);
+        if (isErr(r) || isUnsupported(r)) return r;
+        const type = args[2] ? ev(args[2]) : 1;
+        if (type !== 0 || !(r && typeof r === 'object' && 'range' in r)) return { unsupported: true, fn: 'MATCH' };
+        const key = typeof v === 'string' ? v.toLowerCase() : v;
+        const at = r.range.findIndex((x) => (typeof x === 'string' ? x.toLowerCase() : x) === key);
+        return at < 0 ? ERR('#N/A') : at + 1;
+      }
       case 'MIN': case 'MAX': case 'SUM': case 'AVERAGE': case 'COUNT': {
         const vals = flat(args);
         const direct = args.map((a) => a.k !== 'range' && a.k !== 'ref');
