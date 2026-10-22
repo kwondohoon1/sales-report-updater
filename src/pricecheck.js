@@ -188,7 +188,7 @@ export function checkPriceFile(XLSX, buf, fileName, ctx = {}) {
     if (hdr == null) add('warn', '시트 간 불일치', MC, '', '', '머리글(모델명·지마켓)을 찾지 못함');
     else {
       const col = g.headerMap(hdr);
-      const codeCols = Object.keys(col).filter((h) => !['카테고리', '브랜드', '모델명', '노출가', '등재가', '세팅 등재가', '마켓', '등재가(%)', '원가', '정산가', '마진율', '다나와'].includes(h));
+      const codeCols = Object.keys(col).filter((h) => !['카테고리', '브랜드', '모델명', '노출가', '등재가', '세팅 등재가', '세팅등재가', '마켓', '등재가(%)', '원가', '정산가', '마진율', '다나와'].includes(h));
       const RULES = {
         '지마켓': { re: /^\d{10}$/, need: true }, '옥션': { re: /^F\d{9}$/, need: true }, '자사몰': { re: /^\d{4,8}$/, need: true },
         '하이마트': { re: /^MW\d+_\d+$/, need: true }, '하이마트온라인상품': { re: /^\d{6,12}$/, need: true },
