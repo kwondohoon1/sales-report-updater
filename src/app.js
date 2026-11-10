@@ -233,7 +233,7 @@ function renderCheck() {
   const stat = (k, v, s) => el('div', { class: 'stat' }, el('div', { class: 'k' }, k), el('div', { class: String(v).length > 6 ? 'v long' : 'v' }, v), s ? el('div', { class: 's' }, s) : null);
   $('#stats').replaceChildren(
     stat('추가될 판매행', fmt(p.rows.length), `수량 ${fmt(qty)} · 판매총액 ${fmt(amount)}`),
-    stat('이미 있는 주문(제외)', fmt(p.skipped.dup.length + p.skipped.dupInUpload.length), '주문번호 기준'),
+    stat('이미 있는 주문(제외)', fmt(p.skipped.dup.length + p.skipped.dupInUpload.length), '주문번호·마켓주문번호·상품코드 기준'),
     stat('미등록 상품(제외)', fmt(p.skipped.excluded.length), '아래 표에서 포함 가능'),
     stat('월 시트', months.length ? monthText : '변경 없음', dates.length ? `출고일 ${dates.map((s) => { const d = core.ymdFromSerial(s); return `${d.m}/${d.d}`; }).join(', ')}` : ''),
     stat('재고', state.stock ? fmt(state.stock.rows.length) + '줄' : '그대로', state.stock ? '재고 시트를 이 파일로 교체' : '재고 파일 없음'),

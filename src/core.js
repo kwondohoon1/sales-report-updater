@@ -76,6 +76,10 @@ export const normId = (v) => {
   return String(v).trim().replace(/\.0+$/, '');
 };
 
+// 같은 판매 줄인지 가르는 열쇠. ERP 주문번호만으로는 안 된다 — 한 주문에 상품이 여럿이면
+// 주문번호가 같고 마켓주문번호·상품코드만 다르다(예: 지마켓 한 주문에 그래픽카드+SSD).
+export const saleKey = (orderId, marketOrder, code) => `${orderId}|${marketOrder || ''}|${code || ''}`;
+
 // ---------------------------------------------------------------- 상품명 정규화
 
 // 가격세팅 모델명과 판매현황 모델명은 표기가 다르다(지포스/GeForce, Triple Fan/TF 등).
@@ -300,6 +304,7 @@ export async function readBase(JSZip, buf, fileName) {
 
   const lastRow = lastRowWithValue(sh, 1);
   const orderIds = new Set();
+  const saleKeys = new Set();
   const history = new Map();
   const byDate = new Map(); // serial → [{code, model, cat, market, qty}]
   for (let r = 3; r <= lastRow; r++) {
@@ -310,7 +315,10 @@ export async function readBase(JSZip, buf, fileName) {
     const code = t(1);
     if (!code) continue;
     const oid = normId(t(16));
-    if (oid) orderIds.add(oid);
+    if (oid) {
+      orderIds.add(oid);
+      saleKeys.add(saleKey(oid, normId(t(14)), code));
+    }
     const h = history.get(code) || {};
     const cat = t(18), model = t(19), cost = n(9);
     if (cat) h.cat = cat;
@@ -390,7 +398,7 @@ export async function readBase(JSZip, buf, fileName) {
     if (idx['상품코드'] != null) sheetStock = { file: `${fileName} › 재고 시트`, meta, idx, rows };
   }
 
-  return { fileName, wb, lastRow, orderIds, history, byDate, styles, months, monthCodes, monthSheetCodes, monthRows, allMonthRows, sheetStock };
+  return { fileName, wb, lastRow, orderIds, saleKeys, history, byDate, styles, months, monthCodes, monthSheetCodes, monthRows, allMonthRows, sheetStock };
 }
 
 // ---------------------------------------------------------------- 재고 현황
@@ -493,17 +501,21 @@ export function plan(base, salesRows, price, overrides = {}, stock = null) {
   const resolver = buildCodeResolver(base, stock || base.sheetStock, salesRows);
   const aliases = new Map(); // 원래 코드 → {to, how, model}
 
+  const baseKeys = base.saleKeys || new Set();
   for (const raw of salesRows) {
     if (!raw.date) { skipped.noDate.push(raw); continue; }
-    const key = raw.orderId || `${raw.file}#${raw.line}`;
-    if (raw.orderId && base.orderIds.has(raw.orderId)) { skipped.dup.push(raw); continue; }
+    // 같은 상품의 다른 코드(바뀐 코드·완성품 코드·부품 코드)는 월 시트 AP 코드로 바꿔 쓴다.
+    // 월 시트·일별 SUMIFS가 AP 코드 글자로만 세기 때문이다. 직접 분류한 코드는 건드리지 않는다.
+    const res = ov[raw.code] && ov[raw.code].cat ? null : resolver.resolve(raw.code);
+    const code = res && res.row.ap !== raw.code ? res.row.ap : raw.code;
+    // 중복: 주문번호+마켓주문번호+상품코드가 모두 같은 줄(워크북에는 바꾼 코드로 들어가 있다)
+    const keys = raw.orderId ? [saleKey(raw.orderId, raw.marketOrder, raw.code), saleKey(raw.orderId, raw.marketOrder, code)] : null;
+    if (keys && keys.some((k) => baseKeys.has(k))) { skipped.dup.push(raw); continue; }
+    const key = keys ? keys[1] : `${raw.file}#${raw.line}`;
     if (seen.has(key)) { skipped.dupInUpload.push(raw); continue; }
     seen.add(key);
 
-    // 같은 상품의 다른 코드(바뀐 코드·완성품 코드·부품 코드)는 월 시트 AP 코드로 바꿔 쓴다.
-    // 월 시트·일별 SUMIFS가 AP 코드 글자로만 세기 때문이다. 직접 분류한 코드는 건드리지 않는다.
     let s = raw;
-    const res = ov[raw.code] && ov[raw.code].cat ? null : resolver.resolve(raw.code);
     if (res && res.row.ap !== raw.code) {
       const how = res.how === '같은 코드' ? '월 시트 부품(AQ) 코드' : res.how;
       if (!aliases.has(raw.code)) aliases.set(raw.code, { from: raw.code, to: res.row.ap, how, model: res.row.model, count: 0, qty: 0 });
@@ -604,6 +616,18 @@ function fixDates(text, fn) {
     return r ? `DATE(${r.y},${r.m},${r.d})` : m;
   });
 }
+
+// 월 시트 AJ·AK(전월) 수식의 DATE 범위를 그 달의 직전 달 1일~말일로 맞춘다.
+// 직전 월 시트를 복제하면 원본의 전월(두 달 전)이 그대로 남던 문제(2611이 9월을 보던 것)를 고친다.
+// 수식 안 DATE가 모두 한 달을 가리킬 때만 바꾼다.
+export function fixPrevMonthDates(text, ym) {
+  const p = fromYymm(prevYymm(ym));
+  const months = new Set([...text.matchAll(/DATE\((\d{4}),(\d{1,2}),\d{1,2}\)/g)].map((m) => `${+m[1]}-${+m[2]}`));
+  if (months.size !== 1 || months.has(`${p.y}-${p.m}`)) return text;
+  const pLast = daysInMonth(p.y, p.m);
+  return fixDates(text, (yy, mm, dd) => ({ y: p.y, m: p.m, d: dd === 1 ? 1 : pLast }));
+}
+const PREV_COLS = [36, 37]; // AJ·AK
 
 // 월 시트에서 '카테고리' 머리글 행과 C~AG 날짜 열을 찾는다
 function monthLayout(sh, sst) {
@@ -734,8 +758,18 @@ function refreshMonthSheet(sh, sst, ym, upTo) {
       cell.f.text = fixDates(cell.f.text, (yy, mm, dd) => (yy === y && mm === m && dd !== 1 && dd < endDay ? { y, m, d: endDay } : null));
     }
   }
+  // 이미 만든 월 시트의 전월(AJ·AK)이 직전 달이 아니면 고친다
+  let prevFixed = 0;
+  for (const row of sh.rows.values()) {
+    for (const c of PREV_COLS) {
+      const cell = row.cells.get(c);
+      if (!cell || !cell.f || !cell.f.text) continue;
+      const t = fixPrevMonthDates(cell.f.text, ym);
+      if (t !== cell.f.text) { cell.f.text = t; prevFixed++; }
+    }
+  }
   dropFormulaCache(sh);
-  return { filled };
+  return { filled, prevFixed };
 }
 
 // 새 월 시트: 직전 월 시트를 복제해 날짜·수식·전월 비교를 새 달로 바꾼다
@@ -786,6 +820,8 @@ function buildMonthSheet(templateXml, sst, fromYm, toYm) {
     for (const [src, dst] of [[34, 36], [35, 37]]) { // AH→AJ, AI→AK
       const s = row.cells.get(src);
       const d = row.cells.get(dst);
+      // 원본 시트에 이미 있던 전월 수식은 원본의 전월(두 달 전)을 가리키므로 직전 달로 옮긴다
+      if (d && d.f && d.f.text) { d.f.text = fixPrevMonthDates(d.f.text, toYm); continue; }
       if (!s || !s.f || !s.f.text || (d && d.f)) continue;
       const text = /DATE\(/.test(s.f.text) ? fixDates(s.f.text, toPrev) : shiftFormula(s.f.text, dst - src);
       setFormula(ensureCell(sh, r, dst, getAttr(s.attrs, 's')), text);
@@ -1093,11 +1129,11 @@ export async function apply(JSZip, base, planned, opts = {}) {
       const sh = parseSheet(texts.get(name));
       const inMonth = [...base.byDate.keys(), ...planned.rows.map((r) => r.serial)]
         .filter((sv) => { const d = ymdFromSerial(sv); return yymm(d.y, d.m) === ym; });
-      const { filled } = refreshMonthSheet(sh, wb.sst, ym, Math.max(...inMonth));
+      const { filled, prevFixed } = refreshMonthSheet(sh, wb.sst, ym, Math.max(...inMonth));
       updateCosts(sh, wb.sst, costByCode, report.costChanges, name);
       addAliasStock(sh, wb.sst, stockResolver, report.stockAliases, name);
       texts.set(name, serializeSheet(sh));
-      report.sheetsUpdated.push(`${name} (날짜 칸 ${filled}개 채움)`);
+      report.sheetsUpdated.push(`${name} (날짜 칸 ${filled}개 채움${prevFixed ? `, 전월 수식 ${prevFixed}칸을 직전 달로 고침` : ''})`);
     } else {
       const tpl = months.filter((m) => m < ym).pop() ?? months[months.length - 1];
       if (tpl == null) { report.warnings.push(`${name} 월 시트를 만들 원본 월 시트가 없습니다.`); continue; }

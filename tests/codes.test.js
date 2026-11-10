@@ -77,3 +77,17 @@ test('판매 계획: 바뀐 코드는 월 시트 AP 코드로 바꿔 넣고 내�
   assert.equal(p.aliases.find((a) => a.from === 'WN08-0003').how, '월 시트 부품(AQ) 코드');
   assert.equal(p.rows[0].model, 'ACME D5-4800 16GB');
 });
+
+test('판매 중복: 같은 주문번호라도 마켓주문번호·상품이 다르면 다른 줄', () => {
+  const b = { ...base(), saleKeys: new Set([core.saleKey('4273564', '4482422272', 'WD05-0001')]) };
+  const sale = (orderId, marketOrder, code, line) => ({ file: 'f', line, code, name: '', price: 1000, qty: 1, market: '지마켓', orderId, marketOrder, date: { y: 2026, m: 10, d: 8 } });
+  const p = core.plan(b, [
+    sale('4273564', '4482422272', 'WD05-0001', 1), // 워크북에 이미 있음
+    sale('4273564', '4482422270', 'WD05-0002', 2), // 같은 주문의 다른 상품 → 새 줄
+    sale('4273564', '4482422270', 'WD05-0002', 3), // 같은 파일 안 같은 줄 → 중복
+    sale('4273564', '4482422272', 'BL.9AA.420', 4), // 바뀐 코드지만 월 시트 코드(WD05-0001)로는 이미 있음
+  ], null, {}, stock);
+  assert.equal(p.skipped.dup.length, 2);
+  assert.equal(p.skipped.dupInUpload.length, 1);
+  assert.deepEqual(p.rows.map((r) => r.code), ['WD05-0002']);
+});

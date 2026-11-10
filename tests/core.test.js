@@ -106,3 +106,13 @@ test('실제 파일 통합 시험 (SRU_FIXTURES)', { skip: !FIX && 'SRU_FIXTURES
   const wb = XLSX.read(bytes, { type: 'array', sheetRows: 2 });
   for (const ym of new Set(p.rows.map((r) => String(r.yymm)))) assert.ok(wb.SheetNames.includes(ym));
 });
+
+test('전월 수식: 원본 시트의 두 달 전 범위를 직전 달로 옮긴다', () => {
+  const f = 'SUMIFS(판매현황!$D$3:$D$9,판매현황!$O$3:$O$9,">="&DATE(2026,9,1),판매현황!$O$3:$O$9,"<="&DATE(2026,9,30),판매현황!$A$3:$A$9,$AP4)';
+  assert.equal(core.fixPrevMonthDates(f, 2611), f.replace('DATE(2026,9,1)', 'DATE(2026,10,1)').replace('DATE(2026,9,30)', 'DATE(2026,10,31)'));
+  assert.equal(core.fixPrevMonthDates(f, 2610), f); // 이미 직전 달
+  // 해 넘김: 2601의 전월은 2512
+  const nov = f.replace('DATE(2026,9,1)', 'DATE(2025,11,1)').replace('DATE(2026,9,30)', 'DATE(2025,11,30)');
+  assert.equal(core.fixPrevMonthDates(nov, 2601), f.replace('DATE(2026,9,1)', 'DATE(2025,12,1)').replace('DATE(2026,9,30)', 'DATE(2025,12,31)'));
+  assert.equal(core.fixPrevMonthDates('SUM(AJ4:AJ9)', 2611), 'SUM(AJ4:AJ9)');
+});
