@@ -3,7 +3,7 @@
 // 매출현황과의 대조(원가 변경, 최대혜택가 이하 판매, 정산 단가 변경)를 항목별로 돌려준다.
 
 import { recalcWorkbook, cachedValue, r1c1, isErr, isUnsupported } from './formula.js';
-import { nameKey, ymdFromSerial, serialFromYMD, DEFAULT_MARKET_BLOCK } from './core.js';
+import { nameKey, ymdFromSerial, serialFromYMD, DEFAULT_MARKET_BLOCK, SETTLE_RATE } from './core.js';
 import { colToNum, numToCol } from './xml.js';
 
 export const SEV = { error: '오류', warn: '주의', info: '정보' };
@@ -562,7 +562,8 @@ function baseChecks(base, main0, gmBlock0, params, add, PS, addrOf, basisOf, gon
       const blockName = DEFAULT_MARKET_BLOCK[market];
       const block = main.blocks.find((b) => blockName && b.name.replace(/[\s·.]/g, '') === blockName.replace(/[\s·.]/g, '')) || gmBlock;
       const now = row.at(block.settle);
-      if (isNum(now) && Math.abs(now - s.unit) > 1) {
+      // 판매행 정산은 SETTLE_RATE(98%)를 곱해 넣는다. 그 전(2026-11 이전) 행은 100%라 둘 다 같다고 본다.
+      if (isNum(now) && Math.abs(now - s.unit) > 1 && Math.abs(now * SETTLE_RATE - s.unit) > 1) {
         const d = ymdFromSerial(s.serial);
         changes.push(`${market} ${fmt(s.unit)}(${d.m}/${d.d}) → ${fmt(now)}`);
       }

@@ -116,3 +116,42 @@ test('전월 수식: 원본 시트의 두 달 전 범위를 직전 달로 옮긴
   assert.equal(core.fixPrevMonthDates(nov, 2601), f.replace('DATE(2026,9,1)', 'DATE(2025,12,1)').replace('DATE(2026,9,30)', 'DATE(2025,12,31)'));
   assert.equal(core.fixPrevMonthDates('SUM(AJ4:AJ9)', 2611), 'SUM(AJ4:AJ9)');
 });
+
+test('요약 SUM: 같은 묶음에서 빠진 줄을 더하고 다른 꼴은 그대로', () => {
+  const s = (r, t) => `<c r="${r}" t="inlineStr"><is><t>${t}</t></is></c>`;
+  const v = (r, n) => `<c r="${r}"><v>${n}</v></c>`;
+  const f = (r, t) => `<c r="${r}"><f>${t}</f></c>`;
+  const row = (r, cells) => `<row r="${r}">${cells.join('')}</row>`;
+  const xml = '<worksheet><sheetData>'
+    + row(1, [s('A1', '카테고리'), s('B1', '판매사이트')])
+    + row(2, [s('A2', 'RAM'), s('B2', '자사몰'), v('C2', 1), v('D2', 1), v('E2', 1), v('F2', 1)])
+    + row(3, [s('B3', '지마켓'), v('C3', 2), v('D3', 2), v('E3', 2), v('F3', 2)])
+    + row(4, [s('B4', '11번가'), v('C4', 4), v('D4', 4), v('E4', 4)])
+    + row(5, [s('B5', 'B2B'), v('C5', 8), v('D5', 8), v('E5', 8)])
+    + row(6, [s('A6', 'RAM 요약'), f('C6', 'SUM(C2,C3,C5)'), f('D6', 'SUM(D2:D5)'), f('E6', 'E2*3'), f('F6', 'SUM(F2,F3)'), f('G6', 'SUM(G2,G1003)')])
+    + row(7, [s('A7', 'SSD'), s('B7', '자사몰'), v('C7', 16)])
+    + row(8, [s('B8', '11번가'), v('C8', 32)])
+    + row(9, [s('A9', 'SSD 요약'), f('C9', 'SUM(C7)'), f('D9', 'SUM(C2:C5)')])
+    + '</sheetData></worksheet>';
+  const sh = parseSheet(xml);
+  const r = core.fixSummaryRows(sh, []);
+  assert.equal(getCell(sh, 6, 3).f.text, 'SUM(C2,C3,C5,C4)');
+  assert.equal(getCell(sh, 6, 4).f.text, 'SUM(D2:D5)'); // 이미 다 들어 있음
+  assert.equal(getCell(sh, 6, 5).f.text, 'E2*3'); // SUM 꼴이 아님
+  assert.equal(getCell(sh, 6, 6).f.text, 'SUM(F2,F3,F4,F5)'); // 아직 빈 칸도 묶음이면 더함
+  assert.equal(getCell(sh, 6, 7).f.text, 'SUM(G2,G1003)'); // 묶음 밖 참조
+  assert.equal(getCell(sh, 9, 3).f.text, 'SUM(C7,C8)');
+  assert.equal(getCell(sh, 9, 4).f.text, 'SUM(C2:C5)'); // 다른 열·다른 묶음
+  assert.equal(r.cells, 3);
+  assert.deepEqual(r.rows, ['RAM 요약(6행)에 11번가·B2B', 'SSD 요약(9행)에 11번가']);
+});
+
+test('정산 = 가격세팅 정산액 × 수량 × 0.98', () => {
+  const base = { history: new Map(), monthCodes: new Map([['X1', { cat: 'RAM', model: 'A 16GB' }]]), saleKeys: new Set(), monthRows: [], allMonthRows: [], sheetStock: null };
+  const price = { blocks: ['G마켓·옥션'], items: [{ name: 'A 16GB', key: core.nameKey('A 16GB'), cost: 100, settle: 278400, market: { 'G마켓·옥션': 278378 } }] };
+  const sale = { file: 'f', line: 2, code: 'X1', name: 'A 16GB', price: 300000, qty: 4, market: '지마켓', marketOrder: 'm1', orderId: 'o1', date: { y: 2026, m: 11, d: 13 } };
+  const p = core.plan(base, [sale], price);
+  assert.equal(core.SETTLE_RATE, 0.98);
+  assert.equal(p.rows[0].settle, Math.round(278378 * 4 * 0.98)); // 1091242
+  assert.equal(p.rows[0].settleFrom, 'G마켓·옥션');
+});

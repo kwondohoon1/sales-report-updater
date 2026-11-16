@@ -28,6 +28,10 @@ export const DEFAULT_MARKET_BLOCK = {
   '11번가': '11번가', '11st': '11번가',
 };
 
+// 판매현황 정산(H) = 가격세팅 정산액 × 수량 × SETTLE_RATE.
+// 가격세팅 정산가가 실제 정산(사방넷 공급단가)보다 2%쯤 높게 나와서 2% 낮춰 넣는다(2026-11 사용자 결정).
+export const SETTLE_RATE = 0.98;
+
 const CATEGORY_ORDER = ['RAM', 'SSD', 'VGA'];
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 
@@ -569,7 +573,7 @@ export function plan(base, salesRows, price, overrides = {}, stock = null) {
       serial: serialFromYMD(y, m, d),
       yymm: yymm(y, m),
       week: weekCode(y, m, d),
-      settle: unit == null ? null : Math.round(unit) * s.qty,
+      settle: unit == null ? null : Math.round(Math.round(unit) * s.qty * SETTLE_RATE),
       settleUnit: unit == null ? null : Math.round(unit),
       settleFrom,
       cost,
@@ -646,6 +650,55 @@ function rowsWithDailyFormula(sh) {
     const c = row.cells.get(3);
     if (c && c.f && c.f.text && c.f.text !== '0') out.push(r);
   }
+  return out;
+}
+
+// 월 시트 '○○ 요약' 줄의 SUM이 같은 묶음(카테고리 이름 줄 ~ 요약 바로 윗줄)의 줄을 빠뜨렸으면 더한다.
+// 2610 마켓별 구역의 RAM·SSD에 11번가 줄을 끼웠는데, 요약 SUM이 칸을 하나씩 나열한 꼴이라 새 줄이
+// 들어가지 않았고 2611이 그대로 복제했다. SUM(같은 열 칸·범위) 꼴만 고친다. 아직 빈 날짜 칸도 더해 둔다
+// (그날 판매가 들어오면 바로 합계에 잡히게).
+export function fixSummaryRows(sh, sst) {
+  expandSharedFormulas(sh);
+  const rowNums = [...sh.rows.keys()].sort((a, b) => a - b);
+  const label = (r) => (cellText(getCell(sh, r, 1), sst) || '').trim();
+  const REF = /^\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?$/;
+  const out = { cells: 0, rows: [] };
+  rowNums.forEach((r, i) => {
+    const m = /^(.+?)\s*요약$/.exec(label(r));
+    if (!m) return;
+    let start = null;
+    for (let k = i - 1; k >= 0; k--) {
+      const t = label(rowNums[k]);
+      if (t === m[1]) { start = rowNums[k]; break; }
+      if (/요약$|^TOTAL$|^카테고리$/.test(t)) break;
+    }
+    if (start == null) return;
+    const members = rowNums.filter((x) => x >= start && x < r && cellText(getCell(sh, x, 2), sst));
+    const added = new Set();
+    let n = 0;
+    for (const [c, cell] of sh.rows.get(r).cells) {
+      const f = cell.f && cell.f.text && /^SUM\(([^()]*)\)$/.exec(cell.f.text.trim());
+      if (!f) continue;
+      const col = numToCol(c);
+      const args = f[1].split(',').map((s) => s.trim());
+      const covered = new Set();
+      let ok = args.length > 0;
+      for (const a of args) {
+        const ref = REF.exec(a);
+        if (!ref || ref[1] !== col || (ref[3] && ref[3] !== col)) { ok = false; break; }
+        const lo = +ref[2], hi = ref[4] ? +ref[4] : lo;
+        if (lo < start || hi >= r) { ok = false; break; }
+        for (let x = lo; x <= hi; x++) covered.add(x);
+      }
+      if (!ok) continue;
+      const missing = members.filter((x) => !covered.has(x));
+      if (!missing.length) continue;
+      setFormula(cell, `SUM(${[...args, ...missing.map((x) => col + x)].join(',')})`);
+      missing.forEach((x) => added.add(cellText(getCell(sh, x, 2), sst).trim()));
+      n++;
+    }
+    if (n) { out.cells += n; out.rows.push(`${m[1]} 요약(${r}행)에 ${[...added].join('·')}`); }
+  });
   return out;
 }
 
@@ -1173,6 +1226,19 @@ export async function apply(JSZip, base, planned, opts = {}) {
         let x = serializeSheet(sh);
         x = setColWidth(x, 50, 11);
         texts.set(latest, x);
+      }
+    }
+  }
+
+  // 4-3. 최신 월 시트 요약 SUM에 빠진 줄(2610에 끼운 11번가 줄 등)을 더한다
+  {
+    const latest = String(Math.max(...months));
+    if (texts.has(latest)) {
+      const sh = parseSheet(texts.get(latest));
+      const fx = fixSummaryRows(sh, wb.sst);
+      if (fx.cells) {
+        texts.set(latest, serializeSheet(sh));
+        report.sheetsUpdated.push(`${latest} (요약 합계에 빠진 줄 더함: ${fx.rows.join(', ')} — ${fx.cells}칸)`);
       }
     }
   }
