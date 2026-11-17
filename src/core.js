@@ -31,6 +31,9 @@ export const DEFAULT_MARKET_BLOCK = {
 // 판매현황 정산(H) = 가격세팅 정산액 × 수량 × SETTLE_RATE.
 // 가격세팅 정산가가 실제 정산(사방넷 공급단가)보다 2%쯤 높게 나와서 2% 낮춰 넣는다(2026-11 사용자 결정).
 export const SETTLE_RATE = 0.98;
+// 이 판매사이트는 플랫폼 수수료가 없어 정산을 낮추지 않는다(2026-11 사용자 결정: "B2B는 원래대로").
+export const SETTLE_RATE_EXEMPT = new Set(['B2B']);
+export const settleRateFor = (market) => (SETTLE_RATE_EXEMPT.has(String(market || '').trim().toUpperCase()) ? 1 : SETTLE_RATE);
 
 const CATEGORY_ORDER = ['RAM', 'SSD', 'VGA'];
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
@@ -573,7 +576,7 @@ export function plan(base, salesRows, price, overrides = {}, stock = null) {
       serial: serialFromYMD(y, m, d),
       yymm: yymm(y, m),
       week: weekCode(y, m, d),
-      settle: unit == null ? null : Math.round(Math.round(unit) * s.qty * SETTLE_RATE),
+      settle: unit == null ? null : Math.round(Math.round(unit) * s.qty * settleRateFor(s.market)),
       settleUnit: unit == null ? null : Math.round(unit),
       settleFrom,
       cost,

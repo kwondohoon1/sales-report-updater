@@ -155,3 +155,12 @@ test('정산 = 가격세팅 정산액 × 수량 × 0.98', () => {
   assert.equal(p.rows[0].settle, Math.round(278378 * 4 * 0.98)); // 1091242
   assert.equal(p.rows[0].settleFrom, 'G마켓·옥션');
 });
+
+test('B2B 정산은 0.98을 곱하지 않는다', () => {
+  const base = { history: new Map(), monthCodes: new Map([['X1', { cat: 'RAM', model: 'A 16GB' }]]), saleKeys: new Set(), monthRows: [], allMonthRows: [], sheetStock: null };
+  const price = { blocks: ['G마켓·옥션'], items: [{ name: 'A 16GB', key: core.nameKey('A 16GB'), cost: 100, settle: 278400, market: { 'G마켓·옥션': 278378 } }] };
+  const sale = (market, n) => ({ file: 'f', line: n, code: 'X1', name: 'A 16GB', price: 300000, qty: 4, market, marketOrder: 'm' + n, orderId: 'o' + n, date: { y: 2026, m: 11, d: 13 } });
+  const p = core.plan(base, [sale('B2B', 2), sale('지마켓', 3)], price);
+  assert.equal(p.rows[0].settle, 278400 * 4); // 블록 없음 → 정산가, 100%
+  assert.equal(p.rows[1].settle, Math.round(278378 * 4 * 0.98));
+});
